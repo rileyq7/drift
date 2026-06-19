@@ -427,12 +427,42 @@ class MockProvider:
     def _mock_field(self, f):
         type_str = str(f.type)
         name = f.name.lower()
+
+        # Literals must be checked first — picking a value outside the allowed
+        # set would fail schema validation, so we always return the first one.
+        if 'Literal' in type_str:
+            import re
+            match = re.search(r"['\"]([^'\"]+)['\"]", type_str)
+            return match.group(1) if match else "value"
+
+        # Optional must be checked before list/str, since "Optional[list[str]]"
+        # contains both substrings. For tests we just return None.
+        if 'Optional' in type_str or 'None' in type_str:
+            return None
+
+        if 'list' in type_str:
+            # Recursively pick mock values matching the element type.
+            inner_match = __import__('re').search(r'list\[(.+)\]', type_str)
+            inner = inner_match.group(1) if inner_match else 'str'
+            if 'gap' in name:
+                return ["No significant gaps identified"]
+            if 'str' in inner or "'" in inner or '"' in inner:
+                return ["criterion_1", "criterion_2", "criterion_3"]
+            if 'float' in inner or 'int' in inner:
+                return [1.0, 2.0, 3.0]
+            return []
+
+        if 'bool' in type_str:
+            return True
+
+        if 'float' in type_str or 'int' in type_str:
+            if 'confidence' in name or 'probability' in name:
+                return 0.88
+            if 'score' in name or 'rating' in name:
+                return 82.0
+            return 75.0
+
         if 'str' in type_str:
-            if 'Literal' in type_str:
-                # Extract first literal value
-                import re
-                match = re.search(r"'([^']*)'", type_str)
-                return match.group(1) if match else "value"
             if 'name' in name:
                 return "TechCo Ltd"
             if 'title' in name:
@@ -440,21 +470,7 @@ class MockProvider:
             if 'summary' in name or 'reasoning' in name:
                 return f"Analysis complete for {name}"
             return f"sample_{f.name}"
-        elif 'float' in type_str or 'int' in type_str:
-            # Heuristic: fields with "confidence" or "score between 0 and 1" get small values
-            if 'confidence' in name or 'probability' in name:
-                return 0.88
-            elif 'score' in name or 'rating' in name:
-                return 82.0
-            return 75.0
-        elif 'bool' in type_str:
-            return True
-        elif 'list' in type_str:
-            if 'gap' in name:
-                return ["No significant gaps identified"]
-            return ["criterion_1", "criterion_2", "criterion_3"]
-        elif 'Optional' in type_str:
-            return None
+
         return f"mock_{f.name}"
 
 

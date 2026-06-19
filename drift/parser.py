@@ -318,12 +318,12 @@ class Parser:
         self.eat_ident('quality')
         self.eat(TT.COLON)
         value = float(self.eat(TT.NUMBER).value)
-        # skip "minimum confidence" text
-        while not self.at_end() and self.peek().type not in (TT.NEWLINE, TT.RBRACE):
-            if self.peek().type == TT.IDENT:
+        # Consume the literal phrase "minimum confidence" if present — but
+        # only those exact words, so we don't accidentally eat the next decl.
+        if self.check_ident('minimum'):
+            self.eat()
+            if self.check_ident('confidence'):
                 self.eat()
-            else:
-                break
         return ast.QualityConfig(min_confidence=value)
 
     def parse_state_block(self, agent):
