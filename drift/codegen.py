@@ -44,7 +44,9 @@ class CodeGenerator:
 
         # Generate declarations in order
         for decl in program.declarations:
-            if isinstance(decl, ast.ConfigDecl):
+            if isinstance(decl, ast.ImportDecl):
+                self.gen_import(decl)
+            elif isinstance(decl, ast.ConfigDecl):
                 self.gen_config(decl)
             elif isinstance(decl, ast.SchemaDecl):
                 self.gen_schema(decl)
@@ -102,6 +104,27 @@ class CodeGenerator:
         )
 
     # ─── Config ────────────────────────────────────────────────────
+
+    def gen_import(self, decl: ast.ImportDecl):
+        """import X from "./other.drift"  → from <basename> import X
+
+        - `./foo.drift` → `from foo import X` (sibling file)
+        - `drift/io`    → `from drift.io import X` (stdlib namespace)
+        - any other     → `from <path-normalized> import X`
+        """
+        path = decl.source_path
+        module: str
+        if path.startswith("drift/") and not path.endswith(".drift"):
+            # Stdlib namespace: drift/io → drift.io
+            module = path.replace("/", ".")
+        else:
+            # Sibling .drift file → strip dirs and extension
+            base = path.rsplit("/", 1)[-1]
+            if base.endswith(".drift"):
+                base = base[:-len(".drift")]
+            module = base
+        names = ", ".join(decl.names)
+        self.emit_line(f"from {module} import {names}")
 
     def gen_pipeline(self, pipe: ast.PipelineDecl):
         """A pipeline is a graph of step calls. Generate a runner class.
@@ -946,7 +969,14 @@ class CodeGenerator:
         return f"{call.name}({args_str})"
 
     def gen_pipe(self, pipe: ast.PipeExpr) -> str:
-        """Translate |> pipe operator to nested function calls."""
+        """Translate |> pipe operator to nested function calls.
+
+        This is function-composition piping (the `|>` operator inside an
+        expression), NOT streaming. Spec §2.5 also lists `|>` as a streaming
+        pipeline operator between agents — those two uses are kept separate
+        for now. In a pipeline declaration, `|>` parses as a PipelineEdge
+        with op="|>"; in an expression, it parses as PipeExpr (this method).
+        """
         result = self.gen_expr(pipe.input_expr)
         for op in pipe.operations:
             if isinstance(op, ast.FnCall):

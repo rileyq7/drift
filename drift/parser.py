@@ -126,11 +126,38 @@ class Parser:
             elif t.value == 'pipeline':
                 return self.parse_pipeline()
             elif t.value == 'import':
-                # Skip import lines for MVP
-                self.skip_to_next_statement()
-                return None
+                return self.parse_import()
 
         raise ParseError("Expected 'agent', 'schema', 'config', or 'define verb'", t)
+
+    def parse_import(self):
+        """import X[, Y, ...] from "path"      | import { a, b } from "path" """
+        self.eat_ident('import')
+        decl = ast.ImportDecl()
+        # Brace form: import { a, b, c } from "path"
+        if self.check(TT.LBRACE):
+            self.eat(TT.LBRACE)
+            decl.names.append(self._eat_any_ident())
+            while self.check(TT.COMMA):
+                self.eat(TT.COMMA)
+                decl.names.append(self._eat_any_ident())
+            self.eat(TT.RBRACE)
+        else:
+            # Bare form: import X, Y from "path"
+            decl.names.append(self._eat_any_ident())
+            while self.check(TT.COMMA):
+                self.eat(TT.COMMA)
+                decl.names.append(self._eat_any_ident())
+        self.eat_ident('from')
+        decl.source_path = self.eat(TT.STRING).value
+        return decl
+
+    def _eat_any_ident(self) -> str:
+        """Eat an IDENT or TYPE_IDENT (for import lists with mixed names)."""
+        t = self.peek()
+        if t.type in (TT.IDENT, TT.TYPE_IDENT):
+            return self.eat().value
+        raise ParseError("Expected identifier in import list", t)
 
     def parse_define_verb(self):
         """define verb name { pattern: ..., prompt: ..., output: ..., temperature: ... }"""

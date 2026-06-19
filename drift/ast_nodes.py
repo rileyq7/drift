@@ -20,6 +20,18 @@ class Program:
 
 
 @dataclass
+class ImportDecl:
+    """import X[, Y] from "./other.drift"  — names imported from another file.
+
+    For v0.2 the codegen emits a plain `from <basename>_drift import X, Y`.
+    Dependencies must be transpiled before the importer; the CLI handles this
+    automatically when running `drift run`/`drift transpile` on a tree.
+    """
+    names: list = field(default_factory=list)  # list of str
+    source_path: str = ""                       # path string from the `from` clause
+
+
+@dataclass
 class ConfigDecl:
     """config { name: "...", version: "..." }"""
     entries: dict = field(default_factory=dict)
