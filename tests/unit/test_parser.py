@@ -150,11 +150,12 @@ class TestIntentExpressions:
         assert i.clauses["as"].name == "FitScore"
 
     def test_translate_to_language(self):
-        # translate isn't in INTENT_VERBS — should NOT parse as intent
-        # (this surfaces a spec/impl mismatch)
+        # translate is now a real intent verb.
         agent_src = 'agent A { step s() { let x = translate doc to "French" } }'
-        with pytest.raises(ParseError):
-            parse(agent_src)
+        d = parse(agent_src).declarations[0]
+        intent = d.steps[0].body[0].value
+        assert intent.verb == "translate"
+        assert intent.clauses["to"].value == "French"
 
 
 class TestControlFlow:

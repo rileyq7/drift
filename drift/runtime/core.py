@@ -337,6 +337,14 @@ INTENT_PROMPTS = {
         "Make a decision based on the given context. Return ONLY valid JSON. "
         "No preamble, no markdown."
     ),
+    'match': (
+        "Match the input against the given criteria. Return ONLY valid JSON "
+        "matching the schema. No preamble, no markdown."
+    ),
+    'translate': (
+        "Translate the input to the target language. Return ONLY the "
+        "translated text — no preamble, no quotes, no markdown."
+    ),
 }
 
 

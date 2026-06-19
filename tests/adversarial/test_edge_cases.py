@@ -136,18 +136,16 @@ class TestMatchKeywordConflict:
         ).declarations[0]
         assert d.steps[0].body[0].__class__.__name__ == "MatchStmt"
 
-    @pytest.mark.xfail(
-        reason="Spec ambiguity: `match` is both a verb (§6.1) and a statement "
-               "keyword (§5). Parser picks the statement; the verb form is "
-               "unreachable. Resolve by renaming one in the spec."
-    )
     def test_match_as_intent_verb(self):
-        # Should be: `let x = match input against criteria as Result`
+        # Resolved: parser looks ahead for `against` to distinguish the
+        # intent form from the statement form.
         d = parse(
             'agent A { step f() { let x = match input against criteria as Result } }'
         ).declarations[0]
         intent = d.steps[0].body[0].value
         assert intent.verb == "match"
+        assert "against" in intent.clauses
+        assert intent.clauses["as"].name == "Result"
 
 
 class TestSpecGaps:

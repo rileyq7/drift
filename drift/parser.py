@@ -13,7 +13,11 @@ from . import ast_nodes as ast
 
 INTENT_VERBS = {
     'classify', 'extract', 'summarize', 'rate', 'generate',
-    'rewrite', 'answer', 'compare', 'decide',
+    'rewrite', 'answer', 'compare', 'decide', 'translate',
+    # `match` is also a verb, but the statement keyword has the same name.
+    # `_match_is_intent()` disambiguates by looking for `against` later in
+    # the line — that signals the intent form. See parse_statement().
+    'match',
 }
 
 INTENT_CLAUSE_KEYWORDS = {
@@ -420,6 +424,13 @@ class Parser:
             elif t.value == 'for':
                 return self.parse_for_each()
             elif t.value == 'match':
+                # `match X against Y as T` = intent expression.
+                # `match X { ... }`        = pattern-matching statement.
+                # Lookahead: scan until LBRACE or `against`, pick whichever
+                # comes first.
+                if self._match_is_intent():
+                    expr = self.parse_intent_expr()
+                    return ast.ExprStmt(expr=expr)
                 return self.parse_match()
             elif t.value == 'attempt':
                 return self.parse_attempt()
@@ -623,9 +634,31 @@ class Parser:
 
         # Intent expression
         if t.type == TT.IDENT and t.value in INTENT_VERBS:
+            # `match` is shared with the statement keyword — only treat it
+            # as an intent if the intent shape is present.
+            if t.value == 'match' and not self._match_is_intent():
+                return self.parse_pipe_expr()
             return self.parse_intent_expr()
 
         return self.parse_pipe_expr()
+
+    def _match_is_intent(self) -> bool:
+        """Look ahead from a `match` token to decide if it's an intent.
+
+        Walks forward until either LBRACE (statement), `against` (intent),
+        or newline/EOF (statement, by default). Doesn't consume tokens.
+        """
+        i = self.pos + 1  # skip the `match` itself
+        while i < len(self.tokens):
+            tok = self.tokens[i]
+            if tok.type in (TT.NEWLINE, TT.EOF, TT.RBRACE):
+                return False
+            if tok.type == TT.LBRACE:
+                return False
+            if tok.type == TT.IDENT and tok.value == 'against':
+                return True
+            i += 1
+        return False
 
     def parse_pipe_expr(self):
         """expr |> fn |> fn"""
