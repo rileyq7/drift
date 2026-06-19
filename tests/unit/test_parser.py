@@ -228,6 +228,7 @@ class TestErrors:
         with pytest.raises(ParseError):
             parse("pipeline P { discover -> analyze }")
 
-    def test_tool_keyword_not_implemented(self):
-        with pytest.raises(ParseError):
-            parse('tool t from mcp "x"')
+    def test_tool_keyword_now_parses(self):
+        # Was xfail — now parses.
+        p = parse('tool t from mcp "x"')
+        assert p.declarations[0].kind == "mcp"

@@ -121,6 +121,8 @@ class Parser:
                 return self.parse_agent()
             elif t.value == 'define':
                 return self.parse_define_verb()
+            elif t.value == 'tool':
+                return self.parse_tool()
             elif t.value == 'import':
                 # Skip import lines for MVP
                 self.skip_to_next_statement()
@@ -161,6 +163,89 @@ class Parser:
         self.eat(TT.RBRACE)
         self.custom_verbs.add(verb.name)
         return verb
+
+    # ─── Tool ──────────────────────────────────────────────────────
+
+    def parse_tool(self):
+        """tool name from mcp "url"      | tool name from python "mod:fn" | tool name { ... }"""
+        self.eat_ident('tool')
+        name = self.eat(TT.IDENT).value
+        tool = ast.ToolDecl(name=name)
+
+        if self.check_ident('from'):
+            # `from mcp` or `from python`
+            self.eat()
+            kind_tok = self.eat(TT.IDENT)
+            if kind_tok.value not in ('mcp', 'python'):
+                raise ParseError(
+                    f"Expected 'mcp' or 'python' after 'from', got {kind_tok.value!r}",
+                    kind_tok,
+                )
+            tool.kind = kind_tok.value
+            tool.source = self.eat(TT.STRING).value
+            return tool
+
+        # Block form (REST)
+        if self.check(TT.LBRACE):
+            tool.kind = "rest"
+            self.eat(TT.LBRACE)
+            self.skip_newlines()
+            while not self.check(TT.RBRACE):
+                t = self.peek()
+                if t.type == TT.IDENT and t.value == 'endpoint':
+                    self.eat()
+                    self.eat(TT.COLON)
+                    tool.endpoint = self.eat(TT.STRING).value
+                elif t.type == TT.IDENT and t.value == 'auth':
+                    self.eat()
+                    self.eat(TT.COLON)
+                    # `env("VAR_NAME")`
+                    if self.check_ident('env'):
+                        self.eat()
+                        self.eat(TT.LPAREN)
+                        tool.auth_env = self.eat(TT.STRING).value
+                        self.eat(TT.RPAREN)
+                    else:
+                        # Allow a bare string for static auth tokens (dev only)
+                        tool.auth_env = self.eat(TT.STRING).value
+                elif t.type == TT.IDENT and t.value == 'action':
+                    tool.actions.append(self._parse_tool_action())
+                else:
+                    raise ParseError(
+                        "Expected 'endpoint', 'auth', or 'action' in tool block", t,
+                    )
+                self.skip_newlines()
+            self.eat(TT.RBRACE)
+            return tool
+
+        raise ParseError("Expected 'from <kind>' or '{' after tool name", self.peek())
+
+    def _parse_tool_action(self):
+        self.eat_ident('action')
+        a = ast.ToolAction(name=self.eat(TT.IDENT).value)
+        self.eat(TT.LPAREN)
+        a.params = self.parse_params()
+        self.eat(TT.RPAREN)
+        if self.check(TT.ARROW):
+            self.eat(TT.ARROW)
+            a.return_type = self.parse_type_expr()
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+        # Body: METHOD "/path". HTTP methods are uppercase, so the lexer
+        # classifies them as TYPE_IDENT — accept either token type.
+        method_tok = self.peek()
+        if method_tok.type not in (TT.IDENT, TT.TYPE_IDENT) or method_tok.value not in (
+            "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD",
+        ):
+            raise ParseError(
+                "Expected HTTP method (GET, POST, ...) in action body", method_tok,
+            )
+        a.method = self.eat().value
+        a.path = self.eat(TT.STRING).value
+        self.skip_newlines()
+        self.eat(TT.RBRACE)
+        return a
 
     # ─── Config ────────────────────────────────────────────────────
 

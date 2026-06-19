@@ -50,6 +50,8 @@ class CodeGenerator:
                 self.gen_schema(decl)
             elif isinstance(decl, ast.VerbDecl):
                 self.gen_verb_decl(decl)
+            elif isinstance(decl, ast.ToolDecl):
+                self.gen_tool_decl(decl)
             elif isinstance(decl, ast.AgentDecl):
                 self.gen_agent(decl)
             self.emit_line("")
@@ -98,6 +100,80 @@ class CodeGenerator:
         )
 
     # ─── Config ────────────────────────────────────────────────────
+
+    def gen_tool_decl(self, tool: ast.ToolDecl):
+        """Generate a tool adapter object accessible as <name>.<action>(...)."""
+        self.emit_line(f"# ── Tool: {tool.name} ({tool.kind}) ──")
+        if tool.kind == "python":
+            module_path, _, fn = tool.source.partition(":")
+            if not fn:
+                fn = module_path.split(".")[-1]
+                module_path = ".".join(module_path.split(".")[:-1])
+            safe_module = module_path.replace(".", "_")
+            self.emit_line(f"from {module_path} import {fn} as _drift_tool_{tool.name}")
+            self.emit_line(f"{tool.name} = _drift_tool_{tool.name}")
+            return
+        if tool.kind == "mcp":
+            # MCP support is planned. Emit a placeholder that fails loudly
+            # so users get a useful error rather than silent NameErrors.
+            self.emit_line(f"class _{tool.name}_McpTool:")
+            self.indent()
+            self.emit_line(f'"""Placeholder MCP tool — full protocol support coming in v0.3."""')
+            self.emit_line(f"url = {tool.source!r}")
+            self.emit_line(f"def __getattr__(self, _name):")
+            self.indent()
+            self.emit_line(
+                f'raise NotImplementedError('
+                f'"MCP tools are declared but not yet executed by the runtime. '
+                f'See spec §2.4 for status.")'
+            )
+            self.dedent()
+            self.dedent()
+            self.emit_line(f"{tool.name} = _{tool.name}_McpTool()")
+            return
+        # REST form
+        self.emit_line(f"class _{tool.name}_RestTool:")
+        self.indent()
+        self.emit_line(f'"""REST tool adapter generated from a `tool` block."""')
+        self.emit_line(f"endpoint = {tool.endpoint!r}")
+        if tool.auth_env:
+            self.emit_line(f"auth_env = {tool.auth_env!r}")
+        else:
+            self.emit_line("auth_env = None")
+        self.emit_line("")
+        self.emit_line("def _auth_header(self):")
+        self.indent()
+        self.emit_line("import os")
+        self.emit_line('if not self.auth_env: return {}')
+        self.emit_line('token = os.environ.get(self.auth_env)')
+        self.emit_line('return {"Authorization": f"Bearer {token}"} if token else {}')
+        self.dedent()
+        for action in tool.actions:
+            self.emit_line("")
+            param_strs = ["self"]
+            for p in action.params:
+                param_strs.append(f"{p.name}: {self.gen_type(p.type_expr)}")
+            self.emit_line(f"async def {action.name}({', '.join(param_strs)}):")
+            self.indent()
+            self.emit_line(f'"""{action.method} {action.path}"""')
+            self.emit_line("import httpx")
+            # Use the path template directly; users write {var} which becomes
+            # an f-string substitution.
+            path_fstring = "f" + repr(action.path)
+            self.emit_line(f"path = {path_fstring}")
+            self.emit_line(f"url = self.endpoint + path")
+            self.emit_line(f"async with httpx.AsyncClient() as client:")
+            self.indent()
+            method = action.method.lower()
+            self.emit_line(
+                f"resp = await client.{method}(url, headers=self._auth_header(), timeout=30.0)"
+            )
+            self.dedent()
+            self.emit_line("resp.raise_for_status()")
+            self.emit_line("return resp.json()")
+            self.dedent()
+        self.dedent()
+        self.emit_line(f"{tool.name} = _{tool.name}_RestTool()")
 
     def gen_verb_decl(self, verb: ast.VerbDecl):
         """`define verb name { prompt, output, ... }` → runtime registration."""

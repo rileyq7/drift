@@ -60,6 +60,37 @@ class StateField:
 
 
 @dataclass
+class ToolDecl:
+    """A tool declaration. Three forms — `kind` distinguishes them.
+
+    kind == "mcp":     `tool name from mcp "url"`
+    kind == "python":  `tool name from python "module.path:fn"`
+    kind == "rest":    `tool name { endpoint: ..., auth: ..., action ... }`
+    """
+    name: str = ""
+    kind: str = ""           # "mcp" | "python" | "rest"
+    source: str = ""         # URL (mcp) or "module:fn" (python)
+    endpoint: str = ""       # REST base URL
+    auth_env: str = ""       # env var name for auth header
+    actions: list = field(default_factory=list)  # list of ToolAction
+
+
+@dataclass
+class ToolAction:
+    """One action inside a REST tool.
+
+      action lookup(company_number: string) -> CompanyProfile {
+        GET "/company/{company_number}"
+      }
+    """
+    name: str = ""
+    params: list = field(default_factory=list)        # list of Param
+    return_type: 'TypeExpr | None' = None
+    method: str = "GET"                                # GET, POST, ...
+    path: str = ""                                     # URL template with {var}
+
+
+@dataclass
 class VerbDecl:
     """define verb name { pattern: ..., prompt: ..., output: ..., temperature: ... }
 

@@ -152,9 +152,7 @@ class TestSpecGaps:
     """Sections of the spec that aren't implemented yet — pin them so we
     don't accidentally claim they work."""
 
-    @pytest.mark.xfail(reason="§2.4 tool decl not parsed")
-    def test_tool_declaration(self):
-        parse('tool db from mcp "https://x"')
+    # §2.4 tool declarations ARE now parsed — see test_tool.py
 
     @pytest.mark.xfail(reason="§2.5 pipeline decl not parsed")
     def test_pipeline_declaration(self):
