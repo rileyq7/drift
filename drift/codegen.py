@@ -94,7 +94,7 @@ class CodeGenerator:
             '# Drift runtime imports',
             'from drift.runtime import (',
             '    Agent, step_decorator, Budget, ModelRouter, Intent,',
-            '    CostTracker, Checkpoint, Confident, run_agent,',
+            '    CostTracker, Checkpoint, Confident, MemoryStore, run_agent,',
             '    register_custom_verb,',
             '    DriftError, StepFailed, SchemaViolation, BudgetExceeded,',
             '    ModelUnavailable, RateLimited, AuthError,',
@@ -482,6 +482,17 @@ class CodeGenerator:
         if agent.quality_config:
             quality = agent.quality_config.min_confidence
 
+        # Memory config (optional)
+        mem_arg = "None"
+        if agent.memory_config:
+            m = agent.memory_config
+            mem_arg = (
+                f'MemoryStore(store_url={m.store!r}, '
+                f'recall_strategy={m.recall_strategy!r}, '
+                f'max_recall={m.max_recall}, '
+                f'decay_enabled={m.decay_enabled})'
+            )
+
         self.emit_line("")
         self.emit_line(f"super().__init__(")
         self.indent()
@@ -489,6 +500,8 @@ class CodeGenerator:
         self.emit_line(f'model=model,')
         self.emit_line(f'budget=budget,')
         self.emit_line(f'min_confidence={quality},')
+        if agent.memory_config:
+            self.emit_line(f'memory={mem_arg},')
         self.dedent()
         self.emit_line(")")
 
@@ -646,6 +659,8 @@ class CodeGenerator:
             self.emit_line("continue  # retry the attempt block")
         elif isinstance(stmt, ast.FailStmt):
             self.gen_fail(stmt)
+        elif isinstance(stmt, ast.RememberStmt):
+            self.gen_remember(stmt)
         elif isinstance(stmt, ast.ExprStmt):
             expr_code = self.gen_expr(stmt.expr)
             if 'await' in expr_code:
@@ -800,6 +815,11 @@ class CodeGenerator:
         msg = self.gen_expr(stmt.message) if stmt.message else '"step failed"'
         self.emit_line(f"raise StepFailed({msg})")
 
+    def gen_remember(self, stmt: ast.RememberStmt):
+        val = self.gen_expr(stmt.value)
+        tag = self.gen_expr(stmt.tag) if stmt.tag is not None else '""'
+        self.emit_line(f"self.memory.remember({val}, tag={tag})")
+
     def gen_match(self, stmt: ast.MatchStmt):
         target = self.gen_expr(stmt.target)
         first = True
@@ -826,6 +846,10 @@ class CodeGenerator:
     def gen_expr(self, expr) -> str:
         if isinstance(expr, ast.IntentExpr):
             return self.gen_intent(expr)
+        elif isinstance(expr, ast.RecallStmt):
+            desc = repr(expr.description)
+            key = self.gen_expr(expr.key) if expr.key is not None else "None"
+            return f"self.memory.recall({desc}, key={key})"
         elif isinstance(expr, ast.FnCall):
             return self.gen_fn_call(expr)
         elif isinstance(expr, ast.FieldAccess):

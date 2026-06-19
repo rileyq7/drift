@@ -47,8 +47,18 @@ class AgentDecl:
     model_config: 'ModelConfig | None' = None
     budget_config: 'BudgetConfig | None' = None
     quality_config: 'QualityConfig | None' = None
+    memory_config: 'MemoryConfig | None' = None
     state_block: list = field(default_factory=list)  # list of StateField
     steps: list = field(default_factory=list)        # list of StepDecl
+
+
+@dataclass
+class MemoryConfig:
+    """memory { store: "sqlite://...", recall strategy: "semantic", ... }"""
+    store: str = "sqlite://:memory:"   # default to in-memory
+    recall_strategy: str = "recent"     # "semantic" | "recent" | "relevant" | "all"
+    max_recall: int = 20
+    decay_enabled: bool = False
 
 
 @dataclass
@@ -318,6 +328,23 @@ class RecoverArm:
 class RetryStmt:
     """`retry` inside a recover arm — re-run the attempt block."""
     pass
+
+
+@dataclass
+class RecallStmt:
+    """recall [similar] <description> [for <key>] — wraps memory.recall().
+
+    Always an expression (returns a list). Parsed at expression position.
+    """
+    description: str = ""
+    key: 'Expression | None' = None
+
+
+@dataclass
+class RememberStmt:
+    """remember <expr> [tagged <key>] — wraps memory.remember()."""
+    value: 'Expression' = None
+    tag: 'Expression | None' = None
 
 
 @dataclass

@@ -313,6 +313,101 @@ class ModelRouter:
 
 # ─── Checkpoint ────────────────────────────────────────────────────────
 
+class MemoryStore:
+    """Pluggable agent memory — persists across runs.
+
+    v0.2 implementation: SQLite-backed key/tag/value store with three
+    recall strategies:
+      - "recent":   most recently added items, regardless of tag
+      - "relevant": items whose tag matches the lookup key (substring match)
+      - "semantic": same as "relevant" for now — no embedding model wired
+                    yet. Documented as v0.3 work. Falls back gracefully.
+      - "all":      everything ever stored, no filtering
+
+    URL formats:
+      sqlite://path/to/file.db   -- file-backed
+      sqlite://:memory:          -- in-process, lost on restart (default)
+    """
+    def __init__(self, store_url: str = "sqlite://:memory:",
+                 recall_strategy: str = "recent",
+                 max_recall: int = 20,
+                 decay_enabled: bool = False):
+        import sqlite3
+        self.recall_strategy = recall_strategy
+        self.max_recall = max_recall
+        self.decay_enabled = decay_enabled
+        if not store_url.startswith("sqlite://"):
+            raise ValueError(
+                f"Only sqlite:// stores supported in v0.2, got {store_url!r}"
+            )
+        path = store_url[len("sqlite://"):]
+        self._conn = sqlite3.connect(path)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS memories ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  tag TEXT,"
+            "  value TEXT,"
+            "  created_at REAL"
+            ")"
+        )
+        self._conn.commit()
+
+    def remember(self, value: Any, tag: str = ""):
+        """Persist a value with an optional tag for later recall."""
+        payload = self._serialize(value)
+        self._conn.execute(
+            "INSERT INTO memories (tag, value, created_at) VALUES (?, ?, ?)",
+            (str(tag), payload, time.time()),
+        )
+        self._conn.commit()
+
+    def recall(self, query: str = "", key: Any = None) -> list:
+        """Return up to max_recall stored values matching the strategy."""
+        strategy = self.recall_strategy
+        if strategy == "all":
+            rows = self._conn.execute(
+                "SELECT value FROM memories ORDER BY created_at DESC LIMIT ?",
+                (self.max_recall,),
+            ).fetchall()
+        elif strategy in ("relevant", "semantic"):
+            # Tag substring match against the key. Semantic mode in v0.2
+            # behaves identically; we surface a one-time warning so users
+            # know they're not getting embeddings yet.
+            if strategy == "semantic" and not getattr(self, "_warned_semantic", False):
+                print("  ℹ  memory recall strategy 'semantic' falls back to tag match in v0.2")
+                self._warned_semantic = True
+            key_str = str(key) if key is not None else ""
+            rows = self._conn.execute(
+                "SELECT value FROM memories WHERE tag LIKE ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (f"%{key_str}%", self.max_recall),
+            ).fetchall()
+        else:  # "recent" or unknown → recent
+            rows = self._conn.execute(
+                "SELECT value FROM memories ORDER BY created_at DESC LIMIT ?",
+                (self.max_recall,),
+            ).fetchall()
+        return [self._deserialize(r[0]) for r in rows]
+
+    def _serialize(self, value) -> str:
+        if dataclasses.is_dataclass(value):
+            return json.dumps({"__dataclass__": type(value).__name__,
+                               "data": dataclasses.asdict(value)})
+        try:
+            return json.dumps(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _deserialize(self, payload: str):
+        try:
+            return json.loads(payload)
+        except (json.JSONDecodeError, TypeError):
+            return payload
+
+    def close(self):
+        self._conn.close()
+
+
 class Checkpoint:
     """Saves step outputs for durability. In-memory for MVP, swappable to SQLite/Redis."""
 
@@ -815,13 +910,15 @@ class Agent:
     """
 
     def __init__(self, name: str, model: ModelRouter = None,
-                 budget: Budget = None, min_confidence: float = 0.85):
+                 budget: Budget = None, min_confidence: float = 0.85,
+                 memory: 'MemoryStore | None' = None):
         self.name = name
         self.model = model or ModelRouter()
         self.budget = budget or Budget()
         self.min_confidence = min_confidence
         self.cost_tracker = CostTracker(self.budget)
         self.checkpoint = Checkpoint(name)
+        self.memory = memory
         self._provider = get_provider()
         self._outputs: list[str] = []
 

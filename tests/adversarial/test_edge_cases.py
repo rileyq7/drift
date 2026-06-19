@@ -158,12 +158,7 @@ class TestSpecGaps:
 
     # §8 attempt/recover IS now parsed — see tests/unit/test_attempt_recover.py
 
-    @pytest.mark.xfail(reason="§9 memory block not parsed")
-    def test_memory_block(self):
-        parse(
-            'agent A { memory { store: "sqlite://./m.db" } '
-            'step f() { respond "x" } }'
-        )
+    # §9 memory block IS now parsed — see test_memory.py
 
     # §6.2 define verb IS now parsed — see test_define_verb.py
 

@@ -495,6 +495,8 @@ class Parser:
                 agent.steps.append(self.parse_step())
             elif t.type == TT.IDENT and t.value == 'state':
                 self.parse_state_block(agent)
+            elif t.type == TT.IDENT and t.value == 'memory':
+                agent.memory_config = self.parse_memory_config()
             else:
                 raise ParseError(f"Unexpected token in agent body", t)
 
@@ -640,6 +642,54 @@ class Parser:
                 self.eat()
         return ast.QualityConfig(min_confidence=value)
 
+    def parse_memory_config(self):
+        """memory { store: ..., recall strategy: ..., max recall: N items, decay: enabled }"""
+        self.eat_ident('memory')
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+
+        m = ast.MemoryConfig()
+        while not self.check(TT.RBRACE):
+            t = self.peek()
+            if t.type != TT.IDENT:
+                raise ParseError("Expected memory field name", t)
+            key = self.eat(TT.IDENT).value
+            if key == 'store':
+                self.eat(TT.COLON)
+                m.store = self.eat(TT.STRING).value
+            elif key == 'recall':
+                # `recall strategy: "semantic"`
+                self.eat_ident('strategy')
+                self.eat(TT.COLON)
+                m.recall_strategy = self.eat(TT.STRING).value
+            elif key == 'max':
+                # `max recall: N items`
+                self.eat_ident('recall')
+                self.eat(TT.COLON)
+                m.max_recall = int(float(self.eat(TT.NUMBER).value))
+                if self.check_ident('items'):
+                    self.eat()
+            elif key == 'decay':
+                self.eat(TT.COLON)
+                if self.check_ident('enabled'):
+                    self.eat()
+                    m.decay_enabled = True
+                elif self.check_ident('disabled'):
+                    self.eat()
+                    m.decay_enabled = False
+                else:
+                    raise ParseError("Expected 'enabled' or 'disabled' after 'decay:'", self.peek())
+            else:
+                raise ParseError(
+                    f"Unknown memory field {key!r} (expected store, recall strategy, max recall, decay)",
+                    t,
+                )
+            self.skip_newlines()
+
+        self.eat(TT.RBRACE)
+        return m
+
     def parse_state_block(self, agent):
         """state { name: type [= default] ... } — agent-instance state.
 
@@ -749,6 +799,12 @@ class Parser:
                 return ast.RetryStmt()
             elif t.value == 'fail':
                 return self.parse_fail()
+            elif t.value == 'remember':
+                return self.parse_remember()
+            elif t.value == 'recall':
+                # `recall` as a bare statement (no `let` binding) — accept it
+                # though the return value is discarded.
+                return ast.ExprStmt(expr=self.parse_recall())
             elif t.value in self._all_verbs():
                 expr = self.parse_intent_expr()
                 return ast.ExprStmt(expr=expr)
@@ -819,6 +875,41 @@ class Parser:
             self.eat()
         msg = self.parse_expression()
         return ast.FailStmt(message=msg)
+
+    def parse_recall(self):
+        """recall [similar] <free-text description> [for <expr>]
+
+        The description is collected as a string up to the `for` keyword,
+        newline, or end of statement. If `for` appears, the expression after
+        it becomes the lookup key (used for tag-based matching).
+        """
+        self.eat_ident('recall')
+        words = []
+        key_expr = None
+        # Optional `similar` marker — no parse change, just absorb.
+        if self.check_ident('similar'):
+            self.eat()
+            words.append('similar')
+        while (not self.at_end() and
+               self.peek().type not in (TT.NEWLINE, TT.RBRACE, TT.EOF)):
+            if self.peek().type == TT.IDENT and self.peek().value == 'for':
+                self.eat()
+                key_expr = self.parse_postfix()
+                break
+            words.append(self.eat().value)
+        return ast.RecallStmt(description=" ".join(words), key=key_expr)
+
+    def parse_remember(self):
+        """remember <expr> [tagged <expr>]"""
+        self.eat_ident('remember')
+        # Collect the value expression — stop at `tagged` or end of line.
+        # We use parse_postfix() to handle field access (result.value) cleanly.
+        value = self.parse_postfix()
+        tag = None
+        if self.check_ident('tagged'):
+            self.eat()
+            tag = self.parse_postfix()
+        return ast.RememberStmt(value=value, tag=tag)
 
     def parse_let(self):
         self.eat_ident('let')
@@ -941,6 +1032,10 @@ class Parser:
     def parse_expression(self):
         """Parse an expression. Handles intent verbs, pipes, and binary ops."""
         t = self.peek()
+
+        # `recall` as an expression: `let past = recall similar X for Y`
+        if t.type == TT.IDENT and t.value == 'recall':
+            return self.parse_recall()
 
         # Intent expression
         if t.type == TT.IDENT and t.value in self._all_verbs():
