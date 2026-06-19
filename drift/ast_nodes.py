@@ -60,6 +60,20 @@ class StateField:
 
 
 @dataclass
+class VerbDecl:
+    """define verb name { pattern: ..., prompt: ..., output: ..., temperature: ... }
+
+    Top-level declaration. Registers a custom intent verb that can be used
+    anywhere a built-in verb appears (classify, extract, summarize, ...).
+    """
+    name: str = ""
+    pattern: str = ""           # cosmetic for v0.2 — docs only
+    prompt: str = ""            # system prompt for the LLM
+    output: 'TypeExpr | None' = None
+    temperature: float = 0.0    # 0 = unspecified; default model temp
+
+
+@dataclass
 class StepDecl:
     """step check(doc: Document) -> FitScore { ... }"""
     name: str = ""

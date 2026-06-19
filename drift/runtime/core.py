@@ -394,9 +394,36 @@ INTENT_PROMPTS = {
 }
 
 
+CUSTOM_VERBS: dict[str, dict] = {}
+"""Registry for `define verb` declarations.
+
+Each entry: name -> {
+    "prompt": str,           # system prompt
+    "output_schema": type,   # optional default output schema
+    "pattern": str,          # for documentation only
+    "temperature": float,    # 0 means unspecified
+}
+"""
+
+
+def register_custom_verb(*, name: str, prompt: str,
+                         output_schema=None, pattern: str = "",
+                         temperature: float = 0.0):
+    """Register a custom intent verb. Called at module-load time by codegen."""
+    CUSTOM_VERBS[name] = {
+        "prompt": prompt,
+        "output_schema": output_schema,
+        "pattern": pattern,
+        "temperature": temperature,
+    }
+
+
 def build_intent_prompt(verb: str, input_data: Any, **kwargs) -> str:
     """Build a complete prompt for an intent expression."""
-    system = INTENT_PROMPTS.get(verb, INTENT_PROMPTS['classify'])
+    if verb in CUSTOM_VERBS:
+        system = CUSTOM_VERBS[verb]["prompt"]
+    else:
+        system = INTENT_PROMPTS.get(verb, INTENT_PROMPTS['classify'])
     parts = [f"INPUT:\n{_format_input(input_data)}"]
 
     if 'source' in kwargs and kwargs['source'] is not None:
@@ -806,6 +833,11 @@ class Agent:
         This is the core runtime method. Every intent verb in Drift
         (classify, extract, summarize, etc.) becomes a call to this method.
         """
+        # If a `define verb` registered a default output schema and the call
+        # didn't override it (no `as` clause), inherit it.
+        if output_schema is None and verb in CUSTOM_VERBS:
+            output_schema = CUSTOM_VERBS[verb].get("output_schema")
+
         # Build prompt first so we have a token estimate for the router.
         system_prompt, user_prompt = build_intent_prompt(
             verb, input_data, output_schema=output_schema, **kwargs

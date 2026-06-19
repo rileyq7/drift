@@ -48,6 +48,8 @@ class CodeGenerator:
                 self.gen_config(decl)
             elif isinstance(decl, ast.SchemaDecl):
                 self.gen_schema(decl)
+            elif isinstance(decl, ast.VerbDecl):
+                self.gen_verb_decl(decl)
             elif isinstance(decl, ast.AgentDecl):
                 self.gen_agent(decl)
             self.emit_line("")
@@ -89,12 +91,35 @@ class CodeGenerator:
             'from drift.runtime import (',
             '    Agent, step_decorator, Budget, ModelRouter, Intent,',
             '    CostTracker, Checkpoint, Confident, run_agent,',
+            '    register_custom_verb,',
             '    DriftError, StepFailed, SchemaViolation, BudgetExceeded,',
             '    ModelUnavailable, RateLimited, AuthError,',
             ')',
         )
 
     # ─── Config ────────────────────────────────────────────────────
+
+    def gen_verb_decl(self, verb: ast.VerbDecl):
+        """`define verb name { prompt, output, ... }` → runtime registration."""
+        self.emit_line(f"# ── Custom verb: {verb.name} ──")
+        output_repr = "None"
+        if verb.output is not None:
+            output_repr = self.gen_type(verb.output)
+        # Escape the prompt for a triple-quoted Python string.
+        # Drift uses """ for multi-line strings already, but the lexer strips
+        # those quotes — so the prompt body is already raw text by the time
+        # we get here. Use json.dumps via repr() to handle quoting safely.
+        prompt_repr = repr(verb.prompt)
+        pattern_repr = repr(verb.pattern)
+        self.emit_line("register_custom_verb(")
+        self.indent()
+        self.emit_line(f'name="{verb.name}",')
+        self.emit_line(f"prompt={prompt_repr},")
+        self.emit_line(f"output_schema={output_repr},")
+        self.emit_line(f"pattern={pattern_repr},")
+        self.emit_line(f"temperature={verb.temperature},")
+        self.dedent()
+        self.emit_line(")")
 
     def gen_config(self, config: ast.ConfigDecl):
         self.emit_line("# ── Config ──")

@@ -169,9 +169,7 @@ class TestSpecGaps:
             'step f() { respond "x" } }'
         )
 
-    @pytest.mark.xfail(reason="§6.2 define verb not parsed")
-    def test_define_verb(self):
-        parse('define verb score_eligibility { pattern: "x" prompt: "y" }')
+    # §6.2 define verb IS now parsed — see test_define_verb.py
 
     # §4 model block form IS now parsed — see test_model_block.py
 

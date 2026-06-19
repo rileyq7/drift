@@ -37,6 +37,12 @@ class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.pos = 0
+        # Custom verbs declared via `define verb` are added here as we go.
+        # A verb must be declared before its first use at a call site.
+        self.custom_verbs: set[str] = set()
+
+    def _all_verbs(self) -> set:
+        return INTENT_VERBS | self.custom_verbs
 
     # ─── Token Navigation ──────────────────────────────────────────
 
@@ -113,12 +119,48 @@ class Parser:
                 return self.parse_schema()
             elif t.value == 'agent':
                 return self.parse_agent()
+            elif t.value == 'define':
+                return self.parse_define_verb()
             elif t.value == 'import':
                 # Skip import lines for MVP
                 self.skip_to_next_statement()
                 return None
 
-        raise ParseError("Expected 'agent', 'schema', or 'config'", t)
+        raise ParseError("Expected 'agent', 'schema', 'config', or 'define verb'", t)
+
+    def parse_define_verb(self):
+        """define verb name { pattern: ..., prompt: ..., output: ..., temperature: ... }"""
+        self.eat_ident('define')
+        self.eat_ident('verb')
+        name = self.eat(TT.IDENT).value
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+
+        verb = ast.VerbDecl(name=name)
+        while not self.check(TT.RBRACE):
+            t = self.peek()
+            if t.type != TT.IDENT:
+                raise ParseError("Expected verb field name", t)
+            key = self.eat(TT.IDENT).value
+            self.eat(TT.COLON)
+            if key == 'pattern':
+                verb.pattern = self.eat(TT.STRING).value
+            elif key == 'prompt':
+                verb.prompt = self.eat(TT.STRING).value
+            elif key == 'output':
+                verb.output = self.parse_type_expr()
+            elif key == 'temperature':
+                verb.temperature = float(self.eat(TT.NUMBER).value)
+            else:
+                raise ParseError(
+                    f"Unknown verb field {key!r} (expected pattern, prompt, output, temperature)",
+                    t,
+                )
+            self.skip_newlines()
+        self.eat(TT.RBRACE)
+        self.custom_verbs.add(verb.name)
+        return verb
 
     # ─── Config ────────────────────────────────────────────────────
 
@@ -518,7 +560,7 @@ class Parser:
                 return ast.RetryStmt()
             elif t.value == 'fail':
                 return self.parse_fail()
-            elif t.value in INTENT_VERBS:
+            elif t.value in self._all_verbs():
                 expr = self.parse_intent_expr()
                 return ast.ExprStmt(expr=expr)
             else:
@@ -712,7 +754,7 @@ class Parser:
         t = self.peek()
 
         # Intent expression
-        if t.type == TT.IDENT and t.value in INTENT_VERBS:
+        if t.type == TT.IDENT and t.value in self._all_verbs():
             # `match` is shared with the statement keyword — only treat it
             # as an intent if the intent shape is present.
             if t.value == 'match' and not self._match_is_intent():
