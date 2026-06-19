@@ -79,6 +79,49 @@ class Intent:
     DECIDE = "decide"
 
 
+# ─── Confident<T> ──────────────────────────────────────────────────────
+
+class Confident:
+    """Wraps an LLM output with a confidence score.
+
+    Supports Drift's `is confident` / `is uncertain` branching: the runtime
+    compares the score against the agent's `min_confidence` threshold to
+    decide which branch to take.
+
+        let result = classify doc as confident<Category>
+        if result is confident { ... }       # confidence >= threshold
+        otherwise if result is uncertain { ... }  # below threshold
+
+    Subscripting at runtime (Confident[T]) is a no-op for codegen — the
+    type parameter is documentation only; the runtime stores Any.
+    """
+    __slots__ = ("value", "confidence")
+
+    def __init__(self, value, confidence: float):
+        self.value = value
+        try:
+            c = float(confidence)
+        except (TypeError, ValueError):
+            c = 0.0
+        # Clamp to [0, 1]. LLMs occasionally return 0.95% as 95.
+        if c > 1.0:
+            c = c / 100.0 if c <= 100.0 else 1.0
+        self.confidence = max(0.0, min(1.0, c))
+
+    def is_confident(self, threshold: float) -> bool:
+        return self.confidence >= threshold
+
+    def __repr__(self):
+        return f"Confident(value={self.value!r}, confidence={self.confidence:.3f})"
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        # Make Confident[T] work as a type annotation. The element type is
+        # only documentation at runtime — validation happens via the wrapped
+        # value's schema (if any).
+        return cls
+
+
 # ─── Budget ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -323,7 +366,12 @@ def build_intent_prompt(verb: str, input_data: Any, **kwargs) -> str:
 
     if 'output_schema' in kwargs and kwargs['output_schema'] is not None:
         schema = kwargs['output_schema']
-        if isinstance(schema, type) and dataclasses.is_dataclass(schema):
+        if isinstance(schema, type) and schema is Confident:
+            parts.append(
+                "\nOUTPUT SCHEMA (return valid JSON):\n"
+                '{"value": <your answer>, "confidence": <float 0-1>}'
+            )
+        elif isinstance(schema, type) and dataclasses.is_dataclass(schema):
             schema_info = _describe_schema(schema)
             parts.append(f"\nOUTPUT SCHEMA (return valid JSON matching this):\n{schema_info}")
         elif isinstance(schema, str):
@@ -372,6 +420,21 @@ def parse_llm_response(text: str, output_schema=None) -> Any:
     except json.JSONDecodeError:
         raise SchemaViolation(f"LLM output is not valid JSON: {text[:200]}")
 
+    # Confident<T>: expect {value, confidence}. The inner value isn't validated
+    # against a specific type at this layer — Drift's intent codegen passes the
+    # bare Confident class, not Confident[SomeSchema], so we accept whatever
+    # the LLM gave us for `value` and just enforce the wrapper shape.
+    if isinstance(output_schema, type) and output_schema is Confident:
+        if not isinstance(data, dict):
+            raise SchemaViolation(
+                f"Expected JSON object for Confident, got {type(data).__name__}"
+            )
+        if 'value' not in data or 'confidence' not in data:
+            raise SchemaViolation(
+                f"Confident output must have 'value' and 'confidence' keys, got {list(data)}"
+            )
+        return Confident(data['value'], data['confidence'])
+
     # Instantiate the dataclass if applicable
     if isinstance(output_schema, type) and dataclasses.is_dataclass(output_schema):
         if not isinstance(data, dict):
@@ -412,7 +475,13 @@ class MockProvider:
         tokens_in = len(prompt.split()) * 2  # rough estimate
         await asyncio.sleep(0.1)  # simulate latency
 
-        if output_schema is not None and dataclasses.is_dataclass(output_schema):
+        if output_schema is Confident:
+            # Confident<T>: return a deterministic, high-confidence wrapper so
+            # the `is confident` branch fires by default in tests. Tests that
+            # need to exercise the uncertain branch can monkeypatch the agent's
+            # min_confidence above 0.88.
+            response = json.dumps({"value": "mock_value", "confidence": 0.88})
+        elif output_schema is not None and dataclasses.is_dataclass(output_schema):
             # Generate mock data matching the schema
             mock_data = {}
             for f in dataclasses.fields(output_schema):

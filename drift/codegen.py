@@ -88,7 +88,7 @@ class CodeGenerator:
             '# Drift runtime imports',
             'from drift.runtime import (',
             '    Agent, step_decorator, Budget, ModelRouter, Intent,',
-            '    CostTracker, Checkpoint, run_agent,',
+            '    CostTracker, Checkpoint, Confident, run_agent,',
             ')',
         )
 
@@ -168,8 +168,10 @@ class CodeGenerator:
             return f"dict[{k}, {v}]"
 
         if isinstance(type_expr, ast.ConfidentType):
-            inner = self.gen_type(type_expr.inner_type) if type_expr.inner_type else "dict"
-            return f"tuple[{inner}, float]"  # (value, confidence)
+            # The inner type is documentation; the runtime stores Any.
+            # Codegen emits the bare runtime class so isinstance checks work
+            # and `.value`/`.confidence` attribute access compiles cleanly.
+            return "Confident"
 
         if isinstance(type_expr, ast.EnumType):
             vals = ", ".join(f'"{v}"' for v in type_expr.values)
@@ -475,9 +477,20 @@ class CodeGenerator:
             return repr(expr)
 
     def gen_binop(self, expr: ast.BinOp) -> str:
+        op = expr.op
+        # Special-case `is confident` / `is uncertain` BEFORE evaluating the
+        # right-hand side, because `confident` and `uncertain` are bare
+        # identifiers in the source — we don't want them treated as variable
+        # references in the generated code.
+        if op == 'is' and isinstance(expr.right, ast.Ident):
+            left = self.gen_expr(expr.left)
+            kw = expr.right.name
+            if kw == 'confident':
+                return f"({left}.is_confident(self.min_confidence))"
+            if kw == 'uncertain':
+                return f"(not {left}.is_confident(self.min_confidence))"
         left = self.gen_expr(expr.left)
         right = self.gen_expr(expr.right)
-        op = expr.op
         if op == 'and':
             return f"({left} and {right})"
         elif op == 'or':

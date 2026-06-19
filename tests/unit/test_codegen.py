@@ -32,9 +32,12 @@ class TestSchemaCodegen:
         assert "def validate(self):" in out
         assert "0.0 <= self.score <= 100.0" in out
 
-    def test_confident_becomes_tuple(self, transpile):
+    def test_confident_becomes_runtime_class(self, transpile):
+        # confident<T> compiles to the Confident runtime class. T is doc only —
+        # the runtime stores Any in .value.
         out = transpile("schema X { r: confident<string> }")
-        assert "tuple[str, float]" in out
+        assert "r: Confident" in out
+        assert "tuple[" not in out
 
 
 class TestAgentCodegen:

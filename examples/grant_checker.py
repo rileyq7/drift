@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 # Drift runtime imports
 from drift.runtime import (
     Agent, step_decorator, Budget, ModelRouter, Intent,
-    CostTracker, Checkpoint, run_agent,
+    CostTracker, Checkpoint, Confident, run_agent,
 )
 
 # ── Config ──

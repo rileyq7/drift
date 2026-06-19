@@ -1,0 +1,28 @@
+-- confident_demo.drift — demonstrates confident<T> branching
+--
+-- The classify call returns a Confident wrapper. Downstream branches
+-- check `is confident` / `is uncertain` against the agent's quality
+-- threshold to decide what to do.
+
+config {
+  name: "Confident Demo"
+  version: "0.1.0"
+}
+
+agent Triager {
+  model: "claude-haiku"
+  budget: $0.50 per run
+  quality: 0.85 minimum confidence
+
+  step triage(item: string) -> string {
+    let result = classify item as confident<string>
+
+    if result is confident {
+      respond "Auto-processed: {result.value} (confidence {result.confidence})"
+      return result.value
+    } otherwise if result is uncertain {
+      respond "Flagged for human review: {result.value}"
+      return "needs_review"
+    }
+  }
+}
