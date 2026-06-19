@@ -162,12 +162,7 @@ class TestSpecGaps:
     def test_pipeline_declaration(self):
         parse("pipeline P { a -> b }")
 
-    @pytest.mark.xfail(reason="§8 attempt/recover not parsed")
-    def test_attempt_recover(self):
-        parse(
-            'agent A { step f() { attempt { respond "x" } recover from { '
-            'any error -> respond "fail" } } }'
-        )
+    # §8 attempt/recover IS now parsed — see tests/unit/test_attempt_recover.py
 
     @pytest.mark.xfail(reason="§9 memory block not parsed")
     def test_memory_block(self):

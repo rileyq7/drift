@@ -189,6 +189,41 @@ class ExprStmt:
     expr: 'Expression' = None
 
 
+@dataclass
+class AttemptStmt:
+    """attempt { body } recover from { ErrorType -> handler ... }
+
+    Each arm matches an exception class by name. The arm body is a list of
+    statements; a single-statement arm can be inline via `-> statement`.
+    Special arm patterns:
+      - `any error` matches any DriftError (and is the default fallthrough).
+      - `retry` (as a single-statement body) re-runs the attempt block.
+      - `fail with "..."` raises StepFailed with the given message.
+    """
+    body: list = field(default_factory=list)
+    arms: list = field(default_factory=list)  # list of RecoverArm
+    max_retries: int = 3
+
+
+@dataclass
+class RecoverArm:
+    error_type: str = ""        # exception class name, or "any" for default
+    body: list = field(default_factory=list)
+    is_default: bool = False
+
+
+@dataclass
+class RetryStmt:
+    """`retry` inside a recover arm — re-run the attempt block."""
+    pass
+
+
+@dataclass
+class FailStmt:
+    """`fail with "<message>"` — raise StepFailed."""
+    message: 'Expression' = None
+
+
 # ─── Expressions ───────────────────────────────────────────────────────
 
 @dataclass

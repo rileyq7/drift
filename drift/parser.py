@@ -414,6 +414,13 @@ class Parser:
                 return self.parse_for_each()
             elif t.value == 'match':
                 return self.parse_match()
+            elif t.value == 'attempt':
+                return self.parse_attempt()
+            elif t.value == 'retry':
+                self.eat()
+                return ast.RetryStmt()
+            elif t.value == 'fail':
+                return self.parse_fail()
             elif t.value in INTENT_VERBS:
                 expr = self.parse_intent_expr()
                 return ast.ExprStmt(expr=expr)
@@ -423,6 +430,67 @@ class Parser:
                 return ast.ExprStmt(expr=expr)
 
         raise ParseError("Expected statement", t)
+
+    def parse_attempt(self):
+        self.eat_ident('attempt')
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+
+        node = ast.AttemptStmt()
+        while not self.check(TT.RBRACE):
+            node.body.append(self.parse_statement())
+            self.skip_newlines()
+        self.eat(TT.RBRACE)
+
+        self.skip_newlines()
+        self.eat_ident('recover')
+        self.eat_ident('from')
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+
+        while not self.check(TT.RBRACE):
+            arm = ast.RecoverArm()
+            t = self.peek()
+            # `any error` default arm
+            if t.type == TT.IDENT and t.value == 'any':
+                self.eat()
+                if self.check_ident('error'):
+                    self.eat()
+                arm.is_default = True
+                arm.error_type = 'any'
+            elif t.type == TT.TYPE_IDENT:
+                arm.error_type = self.eat(TT.TYPE_IDENT).value
+            else:
+                raise ParseError(
+                    "Expected an exception type or `any error` in recover arm", t
+                )
+
+            self.eat(TT.ARROW)
+            # Body: single statement, or `{ ... }`
+            if self.check(TT.LBRACE):
+                self.eat(TT.LBRACE)
+                self.skip_newlines()
+                while not self.check(TT.RBRACE):
+                    arm.body.append(self.parse_statement())
+                    self.skip_newlines()
+                self.eat(TT.RBRACE)
+            else:
+                arm.body.append(self.parse_statement())
+            node.arms.append(arm)
+            self.skip_newlines()
+
+        self.eat(TT.RBRACE)
+        return node
+
+    def parse_fail(self):
+        self.eat_ident('fail')
+        # `fail with "<message>"` — `with` is optional sugar
+        if self.check_ident('with'):
+            self.eat()
+        msg = self.parse_expression()
+        return ast.FailStmt(message=msg)
 
     def parse_let(self):
         self.eat_ident('let')

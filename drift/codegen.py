@@ -89,6 +89,8 @@ class CodeGenerator:
             'from drift.runtime import (',
             '    Agent, step_decorator, Budget, ModelRouter, Intent,',
             '    CostTracker, Checkpoint, Confident, run_agent,',
+            '    DriftError, StepFailed, SchemaViolation, BudgetExceeded,',
+            '    ModelUnavailable, RateLimited, AuthError,',
             ')',
         )
 
@@ -320,6 +322,12 @@ class CodeGenerator:
             self.gen_for_each(stmt)
         elif isinstance(stmt, ast.MatchStmt):
             self.gen_match(stmt)
+        elif isinstance(stmt, ast.AttemptStmt):
+            self.gen_attempt(stmt)
+        elif isinstance(stmt, ast.RetryStmt):
+            self.emit_line("continue  # retry the attempt block")
+        elif isinstance(stmt, ast.FailStmt):
+            self.gen_fail(stmt)
         elif isinstance(stmt, ast.ExprStmt):
             expr_code = self.gen_expr(stmt.expr)
             if 'await' in expr_code:
@@ -405,6 +413,74 @@ class CodeGenerator:
             if not stmt.body:
                 self.emit_line("pass")
             self.dedent()
+
+    def gen_attempt(self, stmt: ast.AttemptStmt):
+        """attempt { body } recover from { ErrorType -> handler ... }
+
+        Compiles to a bounded retry loop wrapping try/except. Inside an arm,
+        `retry` becomes `continue` (next iteration). Falling through the arm
+        without `retry` breaks out — recovery succeeded. If the loop runs
+        all iterations without breaking, we raise StepFailed.
+        """
+        self.emit_line(f"# attempt/recover (max {stmt.max_retries} retries)")
+        self.emit_line(f"for _attempt in range({stmt.max_retries}):")
+        self.indent()
+        self.emit_line("try:")
+        self.indent()
+        if not stmt.body:
+            self.emit_line("pass")
+        last_terminal = False
+        for s in stmt.body:
+            self.gen_statement(s)
+            if isinstance(s, (ast.ReturnStmt, ast.FailStmt)):
+                last_terminal = True
+        # If the try body didn't end in return/fail, emit a `break` so a
+        # successful attempt exits the retry loop.
+        if not last_terminal:
+            self.emit_line("break")
+        self.dedent()
+        # Emit except arms. `any error` last because Python evaluates them
+        # in order and DriftError would shadow specific subclasses.
+        specific = [a for a in stmt.arms if not a.is_default]
+        default_arm = next((a for a in stmt.arms if a.is_default), None)
+        for arm in specific:
+            self.emit_line(f"except {arm.error_type} as _err:")
+            self.indent()
+            self._gen_recover_body(arm)
+            self.dedent()
+        if default_arm:
+            self.emit_line("except DriftError as _err:")
+            self.indent()
+            self._gen_recover_body(default_arm)
+            self.dedent()
+        self.dedent()
+        # If we ran all retries without breaking, raise so the caller knows.
+        self.emit_line("else:")
+        self.indent()
+        self.emit_line(
+            f'raise StepFailed("attempt block exhausted {stmt.max_retries} retries")'
+        )
+        self.dedent()
+
+    def _gen_recover_body(self, arm: ast.RecoverArm):
+        if not arm.body:
+            # Bare arm with no statements — re-raise so the failure is visible.
+            self.emit_line("raise")
+            return
+        # Detect a bare `retry` so we know whether to add a fallthrough raise.
+        had_terminal = False
+        for s in arm.body:
+            self.gen_statement(s)
+            if isinstance(s, (ast.RetryStmt, ast.ReturnStmt, ast.FailStmt)):
+                had_terminal = True
+        if not had_terminal:
+            # Recovered without retry/return/fail — break out of the loop
+            # so the attempt doesn't run again.
+            self.emit_line("break")
+
+    def gen_fail(self, stmt: ast.FailStmt):
+        msg = self.gen_expr(stmt.message) if stmt.message else '"step failed"'
+        self.emit_line(f"raise StepFailed({msg})")
 
     def gen_match(self, stmt: ast.MatchStmt):
         target = self.gen_expr(stmt.target)

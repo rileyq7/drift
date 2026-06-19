@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from drift.runtime import (
     Agent, step_decorator, Budget, ModelRouter, Intent,
     CostTracker, Checkpoint, Confident, run_agent,
+    DriftError, StepFailed, SchemaViolation, BudgetExceeded,
+    ModelUnavailable, RateLimited, AuthError,
 )
 
 # ── Config ──
