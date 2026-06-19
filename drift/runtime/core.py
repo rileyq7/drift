@@ -1,0 +1,771 @@
+"""
+Drift Runtime Core — All runtime components in one module.
+
+Components:
+  Agent        — Base class for all Drift agents
+  ModelRouter  — Multi-provider model dispatch with failover
+  Budget       — Cost cap definition
+  CostTracker  — Real-time cost tracking and enforcement
+  Intent       — Translates intent verbs (classify, extract, etc.) into LLM calls
+  Checkpoint   — Durable state serialization between steps
+"""
+
+import os
+import json
+import time
+import asyncio
+import dataclasses
+from dataclasses import dataclass, field, asdict
+from typing import Any, Optional, Type
+from functools import wraps
+
+
+# ─── Errors ────────────────────────────────────────────────────────────
+
+class DriftError(Exception):
+    """Base error for all Drift runtime errors."""
+    pass
+
+class BudgetExceeded(DriftError):
+    """Raised when an agent exceeds its cost budget."""
+    pass
+
+class StepFailed(DriftError):
+    """Raised when a step fails after all retries."""
+    pass
+
+class SchemaViolation(DriftError):
+    """Raised when LLM output doesn't match expected schema."""
+    pass
+
+class ModelUnavailable(DriftError):
+    """
+    Raised when a model can't be reached right now (5xx, network, timeout)
+    or when the router has exhausted all candidates. Recoverable by
+    falling back to another model.
+    """
+    def __init__(self, message: str, model: str = None):
+        super().__init__(message)
+        self.model = model
+
+class RateLimited(DriftError):
+    """
+    Raised on HTTP 429. Recoverable by waiting and retrying — usually
+    with backoff. The current model is still viable.
+    """
+    def __init__(self, message: str, model: str = None, retry_after: float = None):
+        super().__init__(message)
+        self.model = model
+        self.retry_after = retry_after
+
+class AuthError(DriftError):
+    """
+    Raised on HTTP 401/403. NOT recoverable — the key is bad or missing
+    permissions. Fail fast rather than retrying on every model.
+    """
+    pass
+
+
+class Intent:
+    """Namespace for intent verb constants."""
+    CLASSIFY = "classify"
+    EXTRACT = "extract"
+    SUMMARIZE = "summarize"
+    RATE = "rate"
+    GENERATE = "generate"
+    REWRITE = "rewrite"
+    ANSWER = "answer"
+    COMPARE = "compare"
+    DECIDE = "decide"
+
+
+# ─── Budget ────────────────────────────────────────────────────────────
+
+@dataclass
+class Budget:
+    """Defines cost constraints for an agent run."""
+    max_per_run: float = 10.0
+    currency: str = "USD"
+
+    @property
+    def symbol(self):
+        return {'GBP': '£', 'USD': '$', 'EUR': '€'}.get(self.currency, '$')
+
+
+class CostTracker:
+    """Tracks cumulative cost during a run and enforces budget."""
+
+    def __init__(self, budget: Budget):
+        self.budget = budget
+        self.total_cost = 0.0
+        self.call_log: list[dict] = []
+
+    def pre_check(self, estimated_cost: float = 0.01):
+        """Check if we have budget remaining before a call."""
+        if self.total_cost + estimated_cost > self.budget.max_per_run:
+            raise BudgetExceeded(
+                f"Budget exceeded: {self.budget.symbol}{self.total_cost:.4f} spent "
+                f"of {self.budget.symbol}{self.budget.max_per_run:.2f} limit"
+            )
+
+    def record(self, cost: float, model: str, tokens_in: int, tokens_out: int):
+        """Record the cost of a completed call."""
+        self.total_cost += cost
+        self.call_log.append({
+            'model': model,
+            'cost': cost,
+            'tokens_in': tokens_in,
+            'tokens_out': tokens_out,
+            'timestamp': time.time(),
+            'cumulative_cost': self.total_cost,
+        })
+
+    @property
+    def remaining(self) -> float:
+        return max(0, self.budget.max_per_run - self.total_cost)
+
+    def summary(self) -> str:
+        """Human-readable cost summary."""
+        s = self.budget.symbol
+        lines = [
+            f"╔══ Cost Report ═══════════════════════════════╗",
+            f"║  Total: {s}{self.total_cost:.4f} / {s}{self.budget.max_per_run:.2f} budget     ║",
+            f"║  Calls: {len(self.call_log):<38}║",
+        ]
+        if self.call_log:
+            lines.append(f"║{'─' * 46}║")
+            for i, call in enumerate(self.call_log, 1):
+                model = call['model'][:20]
+                cost_str = f"{s}{call['cost']:.4f}"
+                toks = f"{call['tokens_in']}→{call['tokens_out']} tok"
+                lines.append(f"║  {i}. {model:<20} {cost_str:<10} {toks:<10}║")
+        lines.append(f"╚══════════════════════════════════════════════╝")
+        return "\n".join(lines)
+
+
+# ─── Model Router ──────────────────────────────────────────────────────
+
+# Rough cost per 1K tokens (input/output) for routing decisions.
+# Source: Anthropic pricing as of mid-2026 (USD).
+MODEL_COSTS = {
+    'claude-haiku':   {'input': 0.001,   'output': 0.005},
+    'claude-sonnet':  {'input': 0.003,   'output': 0.015},
+    'claude-opus':    {'input': 0.015,   'output': 0.075},
+    'claude-fable':   {'input': 0.005,   'output': 0.025},
+    'gpt-4o':         {'input': 0.005,   'output': 0.015},
+    'gpt-4o-mini':    {'input': 0.00015, 'output': 0.0006},
+}
+
+# Map logical names to current API model IDs.
+# This registry is the single point of update when providers release new
+# versions — agent code keeps using the logical name.
+MODEL_REGISTRY = {
+    'claude-haiku':  'claude-haiku-4-5-20251001',
+    'claude-sonnet': 'claude-sonnet-4-6',
+    'claude-opus':   'claude-opus-4-7',
+    'claude-fable':  'claude-fable-5',
+    'gpt-4o':        'gpt-4o',
+    'gpt-4o-mini':   'gpt-4o-mini',
+}
+
+
+@dataclass
+class ModelRouter:
+    """Routes model calls to the best available provider."""
+    default: str = "claude-sonnet"
+    prefer: str = ""
+    fallback: list[str] = field(default_factory=list)
+    never: list[str] = field(default_factory=list)
+    _unavailable: set = field(default_factory=set)
+
+    def __post_init__(self):
+        if isinstance(self.fallback, str):
+            self.fallback = [self.fallback] if self.fallback else []
+
+    def candidates(self) -> list[str]:
+        """All viable models in preference order."""
+        ordered = [self.prefer or self.default] + list(self.fallback)
+        seen = set()
+        out = []
+        for m in ordered:
+            if not m or m in seen:
+                continue
+            seen.add(m)
+            if m in self._unavailable or m in self.never:
+                continue
+            out.append(m)
+        return out
+
+    def select(self, budget_remaining: float = float('inf')) -> str:
+        """Select the best available model given current constraints."""
+        cands = self.candidates()
+        if not cands:
+            raise ModelUnavailable("No models available — all candidates are marked unavailable or banned")
+        # If budget is tight, prefer cheaper models
+        if budget_remaining < 0.10:
+            cands.sort(key=lambda m: MODEL_COSTS.get(m, {}).get('input', 999))
+        return cands[0]
+
+    def mark_unavailable(self, model: str):
+        if model:
+            self._unavailable.add(model)
+
+    def reset_availability(self):
+        """Clear transient unavailability marks — call at step start."""
+        self._unavailable.clear()
+
+    def api_model_id(self, logical_name: str) -> str:
+        return MODEL_REGISTRY.get(logical_name, logical_name)
+
+    def estimate_cost(self, model: str, tokens_in: int, tokens_out: int) -> float:
+        costs = MODEL_COSTS.get(model, {'input': 0.003, 'output': 0.015})
+        return (tokens_in / 1000 * costs['input']) + (tokens_out / 1000 * costs['output'])
+
+
+# ─── Checkpoint ────────────────────────────────────────────────────────
+
+class Checkpoint:
+    """Saves step outputs for durability. In-memory for MVP, swappable to SQLite/Redis."""
+
+    def __init__(self, agent_name: str):
+        self.agent_name = agent_name
+        self.data: dict[str, Any] = {}
+
+    def save(self, step_name: str, result: Any):
+        key = f"{self.agent_name}.{step_name}"
+        self.data[key] = {
+            'result': self._serialize(result),
+            'timestamp': time.time(),
+        }
+
+    def load(self, step_name: str) -> Any:
+        key = f"{self.agent_name}.{step_name}"
+        if key in self.data:
+            return self.data[key]['result']
+        return None
+
+    def _serialize(self, obj):
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        return obj
+
+
+# ─── Intent System ─────────────────────────────────────────────────────
+
+# System prompts for each intent verb
+INTENT_PROMPTS = {
+    'classify': (
+        "You are a precise classifier. Classify the given input according to "
+        "the specified categories or schema. Return ONLY valid JSON matching "
+        "the schema. No preamble, no markdown."
+    ),
+    'extract': (
+        "You are a precise data extractor. Extract the requested fields from "
+        "the given input. Return ONLY valid JSON matching the schema. "
+        "No preamble, no markdown."
+    ),
+    'summarize': (
+        "You are a concise summarizer. Summarize the given input. "
+        "Be precise and informative. Return ONLY the summary text."
+    ),
+    'rate': (
+        "You are an evaluator. Rate/score the given input against the provided "
+        "criteria. Return ONLY valid JSON matching the schema. "
+        "No preamble, no markdown."
+    ),
+    'generate': (
+        "You are a content generator. Generate content matching the description "
+        "and schema provided. Return ONLY valid JSON matching the schema. "
+        "No preamble, no markdown."
+    ),
+    'rewrite': (
+        "You are a rewriter. Rewrite the given text in the specified style or "
+        "format. Return ONLY the rewritten text."
+    ),
+    'answer': (
+        "Answer the question using only the provided context. Be precise. "
+        "If the context doesn't contain enough information, say so."
+    ),
+    'compare': (
+        "Compare the given items. Return ONLY valid JSON matching the schema. "
+        "No preamble, no markdown."
+    ),
+    'decide': (
+        "Make a decision based on the given context. Return ONLY valid JSON. "
+        "No preamble, no markdown."
+    ),
+}
+
+
+def build_intent_prompt(verb: str, input_data: Any, **kwargs) -> str:
+    """Build a complete prompt for an intent expression."""
+    system = INTENT_PROMPTS.get(verb, INTENT_PROMPTS['classify'])
+    parts = [f"INPUT:\n{_format_input(input_data)}"]
+
+    if 'source' in kwargs and kwargs['source'] is not None:
+        parts.append(f"\nSOURCE DOCUMENT:\n{_format_input(kwargs['source'])}")
+
+    if 'criteria' in kwargs and kwargs['criteria'] is not None:
+        parts.append(f"\nCRITERIA:\n{_format_input(kwargs['criteria'])}")
+
+    if 'context' in kwargs and kwargs['context'] is not None:
+        parts.append(f"\nCONTEXT:\n{_format_input(kwargs['context'])}")
+
+    if 'count' in kwargs:
+        unit = kwargs.get('unit', 'items')
+        parts.append(f"\nReturn exactly {kwargs['count']} {unit}.")
+
+    if 'target' in kwargs and kwargs['target'] is not None:
+        parts.append(f"\nTARGET: {kwargs['target']}")
+
+    if 'factors' in kwargs and kwargs['factors'] is not None:
+        parts.append(f"\nCONSIDER THESE FACTORS: {', '.join(str(f) for f in kwargs['factors'])}")
+
+    if 'output_schema' in kwargs and kwargs['output_schema'] is not None:
+        schema = kwargs['output_schema']
+        if isinstance(schema, type) and dataclasses.is_dataclass(schema):
+            schema_info = _describe_schema(schema)
+            parts.append(f"\nOUTPUT SCHEMA (return valid JSON matching this):\n{schema_info}")
+        elif isinstance(schema, str):
+            parts.append(f"\nRETURN TYPE: {schema}")
+
+    return system, "\n".join(parts)
+
+
+def _format_input(data: Any) -> str:
+    if isinstance(data, str):
+        return data
+    if isinstance(data, list):
+        return "\n".join(str(item) for item in data)
+    if dataclasses.is_dataclass(data):
+        return json.dumps(dataclasses.asdict(data), indent=2)
+    return str(data)
+
+
+def _describe_schema(cls) -> str:
+    """Generate a JSON schema description from a dataclass."""
+    if not dataclasses.is_dataclass(cls):
+        return str(cls)
+
+    fields_desc = {}
+    for f in dataclasses.fields(cls):
+        type_str = str(f.type).replace('typing.', '')
+        fields_desc[f.name] = type_str
+
+    return json.dumps(fields_desc, indent=2)
+
+
+def parse_llm_response(text: str, output_schema=None) -> Any:
+    """Parse LLM response text into the expected schema."""
+    if output_schema is None or output_schema == str:
+        return text.strip()
+
+    # Try to parse as JSON
+    cleaned = text.strip()
+    if cleaned.startswith('```'):
+        lines = cleaned.split('\n')
+        cleaned = '\n'.join(lines[1:-1] if lines[-1].strip() == '```' else lines[1:])
+        cleaned = cleaned.strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        raise SchemaViolation(f"LLM output is not valid JSON: {text[:200]}")
+
+    # Instantiate the dataclass if applicable
+    if isinstance(output_schema, type) and dataclasses.is_dataclass(output_schema):
+        if not isinstance(data, dict):
+            raise SchemaViolation(
+                f"Expected JSON object for {output_schema.__name__}, got {type(data).__name__}: {data!r:.200}"
+            )
+        valid_fields = {f.name for f in dataclasses.fields(output_schema)}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        try:
+            instance = output_schema(**filtered)
+        except TypeError as e:
+            raise SchemaViolation(f"Cannot instantiate {output_schema.__name__}: {e}")
+        # Run generated constraint validation (between, etc.) — raises
+        # SchemaViolation so step_decorator can retry with a stricter prompt.
+        if hasattr(instance, 'validate'):
+            try:
+                instance.validate()
+            except AssertionError as e:
+                raise SchemaViolation(
+                    f"{output_schema.__name__} failed constraint validation: {e}"
+                )
+        return instance
+
+    return data
+
+
+# ─── LLM Provider ─────────────────────────────────────────────────────
+
+class MockProvider:
+    """
+    Mock LLM provider for testing. Generates plausible structured output
+    based on the schema without making real API calls.
+    """
+
+    async def call(self, model: str, system: str, prompt: str,
+                   output_schema=None) -> tuple[str, int, int]:
+        """Returns (response_text, tokens_in, tokens_out)"""
+        tokens_in = len(prompt.split()) * 2  # rough estimate
+        await asyncio.sleep(0.1)  # simulate latency
+
+        if output_schema is not None and dataclasses.is_dataclass(output_schema):
+            # Generate mock data matching the schema
+            mock_data = {}
+            for f in dataclasses.fields(output_schema):
+                mock_data[f.name] = self._mock_field(f)
+            response = json.dumps(mock_data, indent=2)
+        else:
+            response = f"[Mock {model} response to: {prompt[:80]}...]"
+
+        tokens_out = len(response.split()) * 2
+        return response, tokens_in, tokens_out
+
+    def _mock_field(self, f):
+        type_str = str(f.type)
+        name = f.name.lower()
+        if 'str' in type_str:
+            if 'Literal' in type_str:
+                # Extract first literal value
+                import re
+                match = re.search(r"'([^']*)'", type_str)
+                return match.group(1) if match else "value"
+            if 'name' in name:
+                return "TechCo Ltd"
+            if 'title' in name:
+                return "Smart Grants R&D"
+            if 'summary' in name or 'reasoning' in name:
+                return f"Analysis complete for {name}"
+            return f"sample_{f.name}"
+        elif 'float' in type_str or 'int' in type_str:
+            # Heuristic: fields with "confidence" or "score between 0 and 1" get small values
+            if 'confidence' in name or 'probability' in name:
+                return 0.88
+            elif 'score' in name or 'rating' in name:
+                return 82.0
+            return 75.0
+        elif 'bool' in type_str:
+            return True
+        elif 'list' in type_str:
+            if 'gap' in name:
+                return ["No significant gaps identified"]
+            return ["criterion_1", "criterion_2", "criterion_3"]
+        elif 'Optional' in type_str:
+            return None
+        return f"mock_{f.name}"
+
+
+class AnthropicProvider:
+    """Real LLM provider using the Anthropic API."""
+
+    def __init__(self):
+        self.api_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not self.api_key:
+            raise DriftError(
+                "ANTHROPIC_API_KEY not set. Use MockProvider or set the env var."
+            )
+
+    async def call(self, model: str, system: str, prompt: str,
+                   output_schema=None) -> tuple[str, int, int]:
+        import httpx
+
+        api_model = MODEL_REGISTRY.get(model, model)
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": api_model,
+                        "max_tokens": 2048,
+                        "system": system,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                    timeout=60.0,
+                )
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            raise ModelUnavailable(
+                f"Network error reaching Anthropic for {model}: {e}", model=model
+            )
+
+        status = response.status_code
+        if status == 200:
+            data = response.json()
+            text = data['content'][0]['text']
+            usage = data.get('usage', {})
+            return text, usage.get('input_tokens', 0), usage.get('output_tokens', 0)
+
+        body = response.text[:200]
+        if status in (401, 403):
+            # Auth errors aren't recoverable by retrying or falling back.
+            raise AuthError(f"Anthropic auth failed ({status}): {body}")
+        if status == 429:
+            retry_after = response.headers.get('retry-after')
+            try:
+                retry_after = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_after = None
+            raise RateLimited(
+                f"Rate limited by Anthropic ({status}): {body}",
+                model=model,
+                retry_after=retry_after,
+            )
+        if status == 404:
+            # Model ID is wrong — treat as that specific model being unavailable
+            # so the router can try a fallback.
+            raise ModelUnavailable(
+                f"Anthropic returned 404 for model {api_model!r}: {body}", model=model
+            )
+        # 5xx, anything else — provider-side problem, try a fallback.
+        raise ModelUnavailable(
+            f"Anthropic API error ({status}) for {model}: {body}", model=model
+        )
+
+
+def get_provider():
+    """Get the best available provider.
+
+    Honors DRIFT_USE_MOCK=1 to force the mock provider even when an API key
+    is present — useful for offline development and tests.
+    """
+    if os.environ.get('DRIFT_USE_MOCK') == '1':
+        print("  ℹ  Using mock provider (DRIFT_USE_MOCK=1)")
+        return MockProvider()
+    if os.environ.get('ANTHROPIC_API_KEY'):
+        try:
+            return AnthropicProvider()
+        except Exception:
+            pass
+    print("  ℹ  Using mock provider (set ANTHROPIC_API_KEY for real LLM calls)")
+    return MockProvider()
+
+
+# ─── Step Decorator ────────────────────────────────────────────────────
+
+def step_decorator(output=None, modifier=""):
+    """Decorator that wraps agent steps with cost tracking, checkpointing, and retries.
+
+    Recovery policy:
+      - SchemaViolation: retry up to max_retries (LLM might just give better JSON).
+      - ModelUnavailable: mark the failed model unavailable and retry; the router
+        picks the next candidate. If candidates exhaust, give up.
+      - RateLimited: wait (respecting retry_after) and retry on the same model.
+      - AuthError: fail fast — no retry helps.
+      - BudgetExceeded: fail fast — retrying would only burn more budget.
+    """
+    def decorator(func):
+        func._drift_step = True
+        func._drift_output = output
+        func._drift_modifier = modifier
+
+        @wraps(func)
+        async def wrapper(self, *args, **kwargs):
+            step_name = func.__name__
+            max_retries = 3
+
+            # Clear transient unavailability at the start of each step. A 503
+            # on a previous step shouldn't degrade this one.
+            if hasattr(self, 'model') and self.model is not None:
+                self.model.reset_availability()
+
+            last_error = None
+            for attempt in range(max_retries):
+                try:
+                    result = await func(self, *args, **kwargs)
+                    if output and dataclasses.is_dataclass(output) and isinstance(result, output):
+                        if hasattr(result, 'validate'):
+                            result.validate()
+                    return result
+
+                except SchemaViolation as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        print(f"  ⟳  Schema violation in {step_name}, retrying ({attempt + 1}/{max_retries})")
+                        continue
+                    raise StepFailed(
+                        f"Step '{step_name}' failed after {max_retries} attempts: {e}"
+                    )
+
+                except ModelUnavailable as e:
+                    last_error = e
+                    # Mark the specific model that failed, not whatever
+                    # select() would return next.
+                    self.model.mark_unavailable(getattr(e, 'model', None))
+                    if attempt < max_retries - 1 and self.model.candidates():
+                        next_model = self.model.candidates()[0]
+                        print(f"  ⟳  {getattr(e, 'model', '?')} unavailable, falling back to {next_model}")
+                        continue
+                    raise StepFailed(
+                        f"Step '{step_name}' failed: no models available ({e})"
+                    )
+
+                except RateLimited as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        wait = e.retry_after if e.retry_after else min(2 ** attempt, 30)
+                        print(f"  ⟳  Rate limited on {e.model}, waiting {wait:.1f}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    raise StepFailed(
+                        f"Step '{step_name}' failed after {max_retries} rate-limited attempts"
+                    )
+
+                except (AuthError, BudgetExceeded):
+                    # Both are fail-fast: retrying won't make a bad key good
+                    # or refund spent budget.
+                    raise
+
+            raise StepFailed(
+                f"Step '{step_name}' failed after {max_retries} attempts: {last_error}"
+            )
+
+        return wrapper
+    return decorator
+
+
+# ─── Agent Base Class ──────────────────────────────────────────────────
+
+class Agent:
+    """
+    Base class for all Drift agents.
+
+    Provides:
+      - Model routing (self.model)
+      - Cost tracking (self.cost_tracker)
+      - Checkpointing (self.checkpoint)
+      - Intent execution (self.intent())
+      - Output handling (self.output())
+    """
+
+    def __init__(self, name: str, model: ModelRouter = None,
+                 budget: Budget = None, min_confidence: float = 0.85):
+        self.name = name
+        self.model = model or ModelRouter()
+        self.budget = budget or Budget()
+        self.min_confidence = min_confidence
+        self.cost_tracker = CostTracker(self.budget)
+        self.checkpoint = Checkpoint(name)
+        self._provider = get_provider()
+        self._outputs: list[str] = []
+
+    async def intent(self, verb: str, input_data: Any = None,
+                     output_schema=None, **kwargs) -> Any:
+        """
+        Execute an intent expression.
+
+        This is the core runtime method. Every intent verb in Drift
+        (classify, extract, summarize, etc.) becomes a call to this method.
+        """
+        # Select model
+        model_name = self.model.select(self.cost_tracker.remaining)
+
+        # Build prompt
+        system_prompt, user_prompt = build_intent_prompt(
+            verb, input_data, output_schema=output_schema, **kwargs
+        )
+
+        # Pre-check budget
+        estimated_cost = self.model.estimate_cost(model_name, len(user_prompt) // 4, 500)
+        self.cost_tracker.pre_check(estimated_cost)
+
+        # Call LLM
+        print(f"  ▸  {verb}() via {model_name}")
+        response_text, tokens_in, tokens_out = await self._provider.call(
+            model_name, system_prompt, user_prompt, output_schema
+        )
+
+        # Track cost
+        actual_cost = self.model.estimate_cost(model_name, tokens_in, tokens_out)
+        self.cost_tracker.record(actual_cost, model_name, tokens_in, tokens_out)
+
+        # Parse response
+        result = parse_llm_response(response_text, output_schema)
+        return result
+
+    def output(self, text: str):
+        """Handle respond statements."""
+        self._outputs.append(str(text))
+        print(f"  ◆  {text}")
+
+
+# ─── Runner ────────────────────────────────────────────────────────────
+
+async def run_agent(agent_class: type, step_name: str = None,
+                    inputs: dict = None) -> Any:
+    """
+    Run a Drift agent from the command line.
+
+    Creates an instance, finds the target step, calls it with inputs,
+    and prints the cost report.
+    """
+    agent = agent_class()
+    inputs = inputs or {}
+
+    print(f"\n{'═' * 50}")
+    print(f"  Drift — Running {agent.name}")
+    print(f"  Budget: {agent.budget.symbol}{agent.budget.max_per_run:.2f}")
+    print(f"  Model: {agent.model.default}")
+    print(f"{'═' * 50}\n")
+
+    # Find the step to run
+    if step_name:
+        method = getattr(agent, step_name, None)
+        if method is None:
+            raise DriftError(f"Step '{step_name}' not found on agent '{agent.name}'")
+    else:
+        # Find first step
+        for attr_name in dir(agent):
+            attr = getattr(agent, attr_name)
+            if callable(attr) and hasattr(attr, '__wrapped__'):
+                method = attr
+                step_name = attr_name
+                break
+        else:
+            # Just run the first method that isn't __init__ or inherited
+            steps = [name for name in dir(agent)
+                     if not name.startswith('_')
+                     and callable(getattr(agent, name))
+                     and name not in ('intent', 'output')]
+            if steps:
+                step_name = steps[0]
+                method = getattr(agent, step_name)
+            else:
+                raise DriftError(f"No steps found on agent '{agent.name}'")
+
+    print(f"  Step: {step_name}({', '.join(f'{k}={v!r}' for k, v in inputs.items())})")
+    print()
+
+    try:
+        start = time.time()
+        result = await method(**inputs)
+        elapsed = time.time() - start
+
+        print()
+        print(agent.cost_tracker.summary())
+        print(f"\n  Time: {elapsed:.2f}s")
+
+        if result is not None:
+            print(f"\n  ── Result ──")
+            if dataclasses.is_dataclass(result):
+                print(f"  {json.dumps(asdict(result), indent=2, default=str)}")
+            else:
+                print(f"  {result}")
+
+        return result
+
+    except BudgetExceeded as e:
+        print(f"\n  ✗ Budget exceeded: {e}")
+        print(agent.cost_tracker.summary())
+        raise
+
+    except StepFailed as e:
+        print(f"\n  ✗ Step failed: {e}")
+        raise

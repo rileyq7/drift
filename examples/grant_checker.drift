@@ -1,0 +1,53 @@
+-- grant_checker.drift — Score companies against grant calls
+
+config {
+  name: "Grant Eligibility Checker"
+  version: "1.0.0"
+}
+
+schema EligibilityCriteria {
+  sector_requirements: list<string>
+  size_requirements: string
+  geographic_scope: string
+  technical_focus: list<string>
+  funding_range: string
+}
+
+schema FitScore {
+  company_name: string
+  grant_title: string
+  overall_score: number between 0 and 100
+  matching_criteria: list<string>
+  gaps: list<string>
+  recommendation: one of "strong fit", "possible fit", "weak fit", "no fit"
+  reasoning: string
+  confidence: number between 0 and 1
+}
+
+agent GrantChecker {
+  model: prefer "claude-sonnet" fallback "gpt-4o"
+  budget: £5 per run
+  quality: 0.85 minimum confidence
+
+  step parse_call(call_text: string) -> EligibilityCriteria {
+    extract sector_requirements, size_requirements,
+           geographic_scope, technical_focus,
+           funding_range from call_text as EligibilityCriteria
+  }
+
+  step evaluate(company_profile: string, call_text: string) -> FitScore {
+    let criteria = parse_call(call_text)
+
+    let score = rate company_profile against criteria as FitScore
+
+    if score.overall_score > 70 {
+      respond "Strong match: {score.company_name} scores {score.overall_score}/100"
+    } otherwise if score.overall_score > 40 {
+      respond "Possible match: {score.company_name} — review recommended"
+    } otherwise {
+      respond "Low fit: {score.company_name} — {score.recommendation}"
+    }
+
+    return score
+  }
+}

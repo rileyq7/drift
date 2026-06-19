@@ -1,0 +1,17 @@
+-- hello.drift — The simplest possible Drift program
+
+config {
+  name: "Hello World"
+  version: "0.1.0"
+}
+
+agent Greeter {
+  model: "claude-haiku"
+  budget: $0.10 per run
+
+  step hello(name: string) -> string {
+    let greeting = generate a warm welcome message as string
+    respond "Hello, {name}!"
+    return greeting
+  }
+}

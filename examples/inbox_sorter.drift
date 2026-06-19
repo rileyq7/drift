@@ -1,0 +1,36 @@
+-- inbox_sorter.drift — Classify and sort emails by priority
+
+config {
+  name: "Inbox Sorter"
+  version: "1.0.0"
+}
+
+schema EmailAnalysis {
+  subject: string
+  priority: one of "urgent", "normal", "low"
+  category: one of "work", "personal", "newsletter", "spam"
+  summary: string
+  action_needed: bool
+  confidence: number between 0 and 1
+}
+
+agent InboxSorter {
+  model: prefer "claude-haiku" fallback "gpt-4o-mini"
+  budget: $0.50 per run
+
+  step sort_emails(emails: list<string>) -> list<EmailAnalysis> {
+    let results = []
+
+    for each email in emails {
+      let analysis = classify email as EmailAnalysis
+
+      if analysis.priority == "urgent" {
+        respond "URGENT: {analysis.subject} — {analysis.summary}"
+      }
+
+      results.add(analysis)
+    }
+
+    return results
+  }
+}
