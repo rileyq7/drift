@@ -82,15 +82,31 @@ class ModelConfig:
     """Model routing configuration."""
     default: str = ""
     prefer: str = ""
-    fallback: str = ""
+    fallback: str = ""        # comma-allowed string OR list, normalized in parser
+    fallback_list: list = field(default_factory=list)
     never: str = ""
-    upgrades: list = field(default_factory=list)
+    never_list: list = field(default_factory=list)
+    upgrades: list = field(default_factory=list)  # list of ModelUpgrade
 
 
 @dataclass
 class ModelUpgrade:
+    """upgrade to "X" when { conditions... }"""
     target_model: str = ""
-    conditions: list = field(default_factory=list)
+    conditions: list = field(default_factory=list)  # list of UpgradeCondition
+
+
+@dataclass
+class UpgradeCondition:
+    """One condition inside an upgrade rule.
+
+    Forms supported in v0.2:
+      - `confidence < 0.8`           (kind="confidence_lt", value=0.8)  [parsed, unenforced]
+      - `input_tokens > N`           (kind="tokens_gt", value=N)
+      - `step is <name>`             (kind="step_is", value=name)
+    """
+    kind: str = ""
+    value: 'float | int | str' = 0
 
 
 @dataclass

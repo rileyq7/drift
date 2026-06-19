@@ -173,13 +173,7 @@ class TestSpecGaps:
     def test_define_verb(self):
         parse('define verb score_eligibility { pattern: "x" prompt: "y" }')
 
-    @pytest.mark.xfail(reason="§4 model block (with `upgrade to ... when`) not parsed")
-    def test_model_block_form(self):
-        parse(
-            'agent A { model { default: "claude-haiku" '
-            'upgrade to "claude-sonnet" when confidence < 0.8 } '
-            'step f() { respond "x" } }'
-        )
+    # §4 model block form IS now parsed — see test_model_block.py
 
     # §9 state block contents ARE now preserved — see test_state.py
 

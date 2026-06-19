@@ -214,12 +214,26 @@ MODEL_REGISTRY = {
 
 @dataclass
 class ModelRouter:
-    """Routes model calls to the best available provider."""
+    """Routes model calls to the best available provider.
+
+    Upgrade rules (§4 model block form):
+      Each rule is {"target": "<model>", "conditions": [{"kind": ..., "value": ...}]}
+      Conditions, when ALL true, escalate the selected model to `target`.
+      Supported kinds:
+        - "tokens_gt"     : input_tokens > value
+        - "step_is"       : current step name == value
+        - "confidence_lt" : LAST call's confidence < value  (best-effort;
+                            requires the runtime to track confidence across
+                            calls — v0.2 stores it on the agent's last
+                            Confident result and reads it here)
+    """
     default: str = "claude-sonnet"
     prefer: str = ""
     fallback: list[str] = field(default_factory=list)
     never: list[str] = field(default_factory=list)
+    upgrades: list[dict] = field(default_factory=list)
     _unavailable: set = field(default_factory=set)
+    _last_confidence: float = 1.0  # updated after each Confident result
 
     def __post_init__(self):
         if isinstance(self.fallback, str):
@@ -239,7 +253,28 @@ class ModelRouter:
             out.append(m)
         return out
 
-    def select(self, budget_remaining: float = float('inf')) -> str:
+    def _apply_upgrades(self, base: str, context: dict) -> str:
+        """Evaluate upgrade rules. First matching rule wins."""
+        for rule in self.upgrades:
+            target = rule.get("target")
+            if not target or target in self._unavailable or target in self.never:
+                continue
+            if all(self._cond_holds(c, context) for c in rule.get("conditions", [])):
+                return target
+        return base
+
+    def _cond_holds(self, cond: dict, context: dict) -> bool:
+        kind, value = cond.get("kind"), cond.get("value")
+        if kind == "tokens_gt":
+            return context.get("input_tokens", 0) > value
+        if kind == "step_is":
+            return context.get("step") == value
+        if kind == "confidence_lt":
+            return self._last_confidence < value
+        return False
+
+    def select(self, budget_remaining: float = float('inf'),
+               context: dict = None) -> str:
         """Select the best available model given current constraints."""
         cands = self.candidates()
         if not cands:
@@ -247,7 +282,18 @@ class ModelRouter:
         # If budget is tight, prefer cheaper models
         if budget_remaining < 0.10:
             cands.sort(key=lambda m: MODEL_COSTS.get(m, {}).get('input', 999))
-        return cands[0]
+        base = cands[0]
+        if self.upgrades and context is not None:
+            return self._apply_upgrades(base, context)
+        return base
+
+    def record_confidence(self, value: float):
+        """Called after a Confident-returning intent so upgrade rules can
+        condition on `confidence < N` for the *next* call."""
+        try:
+            self._last_confidence = float(value)
+        except (TypeError, ValueError):
+            pass
 
     def mark_unavailable(self, model: str):
         if model:
@@ -668,6 +714,9 @@ def step_decorator(output=None, modifier=""):
             # on a previous step shouldn't degrade this one.
             if hasattr(self, 'model') and self.model is not None:
                 self.model.reset_availability()
+            # Remember the current step name so router upgrade rules
+            # (`step is final_recommendation`) can fire.
+            self._current_step = step_name
 
             last_error = None
             for attempt in range(max_retries):
@@ -757,16 +806,25 @@ class Agent:
         This is the core runtime method. Every intent verb in Drift
         (classify, extract, summarize, etc.) becomes a call to this method.
         """
-        # Select model
-        model_name = self.model.select(self.cost_tracker.remaining)
-
-        # Build prompt
+        # Build prompt first so we have a token estimate for the router.
         system_prompt, user_prompt = build_intent_prompt(
             verb, input_data, output_schema=output_schema, **kwargs
         )
+        # Approximate token count: ~4 chars per token is a reasonable rule
+        # of thumb across recent models.
+        estimated_in = (len(system_prompt) + len(user_prompt)) // 4
+
+        # Select model. Pass routing context so upgrade rules can fire.
+        context = {
+            "input_tokens": estimated_in,
+            "step": getattr(self, "_current_step", None),
+        }
+        model_name = self.model.select(
+            self.cost_tracker.remaining, context=context
+        )
 
         # Pre-check budget
-        estimated_cost = self.model.estimate_cost(model_name, len(user_prompt) // 4, 500)
+        estimated_cost = self.model.estimate_cost(model_name, estimated_in, 500)
         self.cost_tracker.pre_check(estimated_cost)
 
         # Call LLM
@@ -781,6 +839,11 @@ class Agent:
 
         # Parse response
         result = parse_llm_response(response_text, output_schema)
+        # Feed confidence back to the router so `confidence < N` upgrade
+        # rules can fire on the NEXT call (we can't retroactively upgrade
+        # the call that just finished).
+        if isinstance(result, Confident):
+            self.model.record_confidence(result.confidence)
         return result
 
     def output(self, text: str):

@@ -274,28 +274,107 @@ class Parser:
 
     def parse_model_config(self):
         self.eat_ident('model')
-        self.eat(TT.COLON)
         config = ast.ModelConfig()
 
-        t = self.peek()
+        # Block form: model { default: ..., upgrade to ..., fallback: ..., ... }
+        if self.check(TT.LBRACE):
+            self.eat(TT.LBRACE)
+            self.skip_newlines()
+            while not self.check(TT.RBRACE):
+                self._parse_model_block_entry(config)
+                self.skip_newlines()
+            self.eat(TT.RBRACE)
+            return config
 
-        # Simple: model: "claude-sonnet"
+        # Colon-form: model: "x"  OR  model: prefer "x" fallback "y"
+        self.eat(TT.COLON)
+        t = self.peek()
         if t.type == TT.STRING:
             config.default = self.eat(TT.STRING).value
             return config
-
-        # Prefer/fallback: model: prefer "x" fallback "y"
         if t.type == TT.IDENT and t.value == 'prefer':
             self.eat()
             config.prefer = self.eat(TT.STRING).value
             if self.check_ident('fallback'):
                 self.eat()
                 config.fallback = self.eat(TT.STRING).value
+                config.fallback_list = [config.fallback]
             config.default = config.prefer
             return config
+        raise ParseError("Expected model string, 'prefer', or '{'", t)
 
-        # Block form: model { ... } — skip for MVP, treat as simple
-        raise ParseError("Expected model string or 'prefer'", t)
+    def _parse_model_block_entry(self, config: 'ast.ModelConfig'):
+        t = self.peek()
+        if t.type == TT.IDENT and t.value == 'default':
+            self.eat()
+            self.eat(TT.COLON)
+            config.default = self.eat(TT.STRING).value
+        elif t.type == TT.IDENT and t.value == 'fallback':
+            self.eat()
+            self.eat(TT.COLON)
+            config.fallback = self.eat(TT.STRING).value
+            config.fallback_list.append(config.fallback)
+            while self.check(TT.COMMA):
+                self.eat(TT.COMMA)
+                config.fallback_list.append(self.eat(TT.STRING).value)
+        elif t.type == TT.IDENT and t.value == 'never':
+            self.eat()
+            self.eat(TT.COLON)
+            config.never = self.eat(TT.STRING).value
+            config.never_list.append(config.never)
+            while self.check(TT.COMMA):
+                self.eat(TT.COMMA)
+                config.never_list.append(self.eat(TT.STRING).value)
+        elif t.type == TT.IDENT and t.value == 'upgrade':
+            config.upgrades.append(self._parse_upgrade_rule())
+        else:
+            raise ParseError("Expected 'default', 'fallback', 'never', or 'upgrade'", t)
+
+    def _parse_upgrade_rule(self):
+        self.eat_ident('upgrade')
+        self.eat_ident('to')
+        target = self.eat(TT.STRING).value
+        upgrade = ast.ModelUpgrade(target_model=target)
+        self.eat_ident('when')
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+        while not self.check(TT.RBRACE):
+            upgrade.conditions.append(self._parse_upgrade_condition())
+            self.skip_newlines()
+        self.eat(TT.RBRACE)
+        return upgrade
+
+    def _parse_upgrade_condition(self) -> 'ast.UpgradeCondition':
+        t = self.peek()
+        if t.type != TT.IDENT:
+            raise ParseError("Expected condition identifier (confidence, input_tokens, step)", t)
+        name = self.eat(TT.IDENT).value
+
+        if name == 'confidence':
+            # confidence < 0.8
+            op_tok = self.peek()
+            if op_tok.type != TT.LANGLE:
+                raise ParseError("Expected '<' after 'confidence' in upgrade condition", op_tok)
+            self.eat(TT.LANGLE)
+            val = float(self.eat(TT.NUMBER).value)
+            return ast.UpgradeCondition(kind="confidence_lt", value=val)
+
+        if name == 'input_tokens':
+            op_tok = self.peek()
+            if op_tok.type != TT.RANGLE:
+                raise ParseError("Expected '>' after 'input_tokens'", op_tok)
+            self.eat(TT.RANGLE)
+            val = int(float(self.eat(TT.NUMBER).value))
+            return ast.UpgradeCondition(kind="tokens_gt", value=val)
+
+        if name == 'step':
+            # `step is <name>`
+            self.eat_ident('is')
+            step_name = self.eat(TT.IDENT).value
+            return ast.UpgradeCondition(kind="step_is", value=step_name)
+
+        raise ParseError(f"Unknown upgrade condition: {name!r}", t)
 
     def parse_budget_config(self):
         self.eat_ident('budget')

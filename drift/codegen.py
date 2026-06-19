@@ -270,10 +270,31 @@ class CodeGenerator:
             parts.append(f'default="{config.default}"')
         if config.prefer and config.prefer != config.default:
             parts.append(f'prefer="{config.prefer}"')
-        if config.fallback:
-            parts.append(f'fallback=["{config.fallback}"]')
-        if config.never:
-            parts.append(f'never=["{config.never}"]')
+        # Block form populates fallback_list/never_list; colon form sets
+        # the scalar `fallback`/`never`. Normalize.
+        fallbacks = list(config.fallback_list) if config.fallback_list else (
+            [config.fallback] if config.fallback else []
+        )
+        nevers = list(config.never_list) if config.never_list else (
+            [config.never] if config.never else []
+        )
+        if fallbacks:
+            parts.append("fallback=[" + ", ".join(f'"{m}"' for m in fallbacks) + "]")
+        if nevers:
+            parts.append("never=[" + ", ".join(f'"{m}"' for m in nevers) + "]")
+        if config.upgrades:
+            rules = []
+            for u in config.upgrades:
+                cond_reprs = []
+                for c in u.conditions:
+                    cond_reprs.append(
+                        f'{{"kind": "{c.kind}", "value": {c.value!r}}}'
+                    )
+                rules.append(
+                    f'{{"target": "{u.target_model}", '
+                    f'"conditions": [{", ".join(cond_reprs)}]}}'
+                )
+            parts.append("upgrades=[" + ", ".join(rules) + "]")
 
         return f"ModelRouter({', '.join(parts)})"
 
