@@ -183,15 +183,7 @@ class TestSpecGaps:
             'step f() { respond "x" } }'
         )
 
-    @pytest.mark.xfail(reason="§9 state block contents are silently discarded")
-    def test_state_block_contents_reach_ast(self):
-        # The parser eats state-block contents via depth-counting; nothing
-        # makes it into the AST. Asserting the AgentDecl.state_block is
-        # non-empty would let us know if/when this changes.
-        d = parse(
-            'agent A { state { counter: number = 0 } step f() { respond "x" } }'
-        ).declarations[0]
-        assert d.state_block, "state block contents not preserved"
+    # §9 state block contents ARE now preserved — see test_state.py
 
 
 class TestSchemaConstraintEdgeCases:

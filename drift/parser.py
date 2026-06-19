@@ -327,20 +327,27 @@ class Parser:
         return ast.QualityConfig(min_confidence=value)
 
     def parse_state_block(self, agent):
+        """state { name: type [= default] ... } — agent-instance state.
+
+        Fields persist across steps within a single run. They become regular
+        Python instance attributes initialized in the agent's __init__.
+        """
         self.eat_ident('state')
         self.skip_newlines()
         self.eat(TT.LBRACE)
         self.skip_newlines()
-        # Skip state block contents for MVP
-        depth = 1
-        while depth > 0:
-            if self.check(TT.LBRACE):
-                depth += 1
-            elif self.check(TT.RBRACE):
-                depth -= 1
-                if depth == 0:
-                    break
-            self.pos += 1
+
+        while not self.check(TT.RBRACE):
+            f = ast.StateField()
+            f.name = self.eat(TT.IDENT).value
+            self.eat(TT.COLON)
+            f.type_expr = self.parse_type_expr()
+            if self.check(TT.EQUALS):
+                self.eat(TT.EQUALS)
+                f.default = self.parse_expression()
+            agent.state_block.append(f)
+            self.skip_newlines()
+
         self.eat(TT.RBRACE)
 
     # ─── Step ──────────────────────────────────────────────────────

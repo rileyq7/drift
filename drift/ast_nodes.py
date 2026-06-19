@@ -47,8 +47,16 @@ class AgentDecl:
     model_config: 'ModelConfig | None' = None
     budget_config: 'BudgetConfig | None' = None
     quality_config: 'QualityConfig | None' = None
-    state_block: list = field(default_factory=list)
-    steps: list = field(default_factory=list)  # list of StepDecl
+    state_block: list = field(default_factory=list)  # list of StateField
+    steps: list = field(default_factory=list)        # list of StepDecl
+
+
+@dataclass
+class StateField:
+    """A single line inside an agent's state block: name: type = default."""
+    name: str = ""
+    type_expr: 'TypeExpr | None' = None
+    default: 'Expression | None' = None
 
 
 @dataclass

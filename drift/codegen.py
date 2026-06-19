@@ -223,6 +223,18 @@ class CodeGenerator:
         self.emit_line(f'min_confidence={quality},')
         self.dedent()
         self.emit_line(")")
+
+        # State fields — initialize on the instance for cross-step access.
+        if agent.state_block:
+            self.emit_line("")
+            self.emit_line("# Agent state (persists across steps within a run)")
+            for f in agent.state_block:
+                if f.default is not None:
+                    val = self.gen_expr(f.default)
+                else:
+                    val = self._default_for_type(f.type_expr)
+                self.emit_line(f"self.{f.name} = {val}")
+
         self.dedent()
 
         # Steps
@@ -231,6 +243,23 @@ class CodeGenerator:
             self.gen_step(s)
 
         self.dedent()
+
+    def _default_for_type(self, type_expr) -> str:
+        """Sensible zero-value for a state field without an explicit default."""
+        if type_expr is None:
+            return "None"
+        if isinstance(type_expr, ast.ListType):
+            return "[]"
+        if isinstance(type_expr, ast.MapType):
+            return "{}"
+        name = getattr(type_expr, "name", "")
+        if name == "string":
+            return '""'
+        if name in ("number", "currency", "duration"):
+            return "0"
+        if name == "bool":
+            return "False"
+        return "None"
 
     def gen_model_init(self, config) -> str:
         if config is None:
