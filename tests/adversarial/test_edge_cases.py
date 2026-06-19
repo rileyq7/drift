@@ -154,9 +154,7 @@ class TestSpecGaps:
 
     # §2.4 tool declarations ARE now parsed — see test_tool.py
 
-    @pytest.mark.xfail(reason="§2.5 pipeline decl not parsed")
-    def test_pipeline_declaration(self):
-        parse("pipeline P { a -> b }")
+    # §2.5 pipeline declarations ARE now parsed — see test_pipeline.py
 
     # §8 attempt/recover IS now parsed — see tests/unit/test_attempt_recover.py
 

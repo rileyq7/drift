@@ -223,10 +223,11 @@ class TestErrors:
         with pytest.raises(ParseError):
             parse("garbage X {}")
 
-    def test_pipeline_keyword_not_implemented(self):
-        # Pipeline is in the spec but not parsed yet — document that.
-        with pytest.raises(ParseError):
-            parse("pipeline P { discover -> analyze }")
+    def test_pipeline_keyword_now_parses(self):
+        # Was xfail — now parses.
+        p = parse("pipeline P { discover -> analyze }")
+        assert p.declarations[0].name == "P"
+        assert len(p.declarations[0].edges) == 1
 
     def test_tool_keyword_now_parses(self):
         # Was xfail — now parses.

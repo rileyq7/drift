@@ -54,6 +54,8 @@ class CodeGenerator:
                 self.gen_tool_decl(decl)
             elif isinstance(decl, ast.AgentDecl):
                 self.gen_agent(decl)
+            elif isinstance(decl, ast.PipelineDecl):
+                self.gen_pipeline(decl)
             self.emit_line("")
 
         return '\n'.join(self.lines)
@@ -100,6 +102,171 @@ class CodeGenerator:
         )
 
     # ─── Config ────────────────────────────────────────────────────
+
+    def gen_pipeline(self, pipe: ast.PipelineDecl):
+        """A pipeline is a graph of step calls. Generate a runner class.
+
+        v0.2 semantics:
+        - Topological execution: walk edges in declaration order, threading
+          the previous result forward.
+        - `->`  sequential: next(prev_result)
+        - `=>`  parallel fan-out: asyncio.gather over each item in prev_result
+        - `~>`  conditional: stub for now (compiles to a runtime warning)
+        - `|>`  stream: stub for now (compiles to a runtime warning)
+        - `on failure in <step>: skip ...` → try/except around that node, swallow
+        - `on budget exceeded:` → catches BudgetExceeded at the outer level
+        """
+        self.emit_line(f"# ── Pipeline: {pipe.name} ──")
+        self.emit_line("")
+        self.emit_line(f"class {pipe.name}:")
+        self.indent()
+        self.emit_line(f'"""Drift pipeline: {pipe.name}"""')
+
+        # Constructor: instantiate `use`d agents.
+        self.emit_line("")
+        self.emit_line("def __init__(self):")
+        self.indent()
+        for agent_name in pipe.use_agents:
+            self.emit_line(f"self.{agent_name} = {agent_name}()")
+        if pipe.budget_config:
+            currency = CURRENCY_MAP.get(pipe.budget_config.currency_sym, 'USD')
+            self.emit_line(
+                f'self.budget = Budget(max_per_run={pipe.budget_config.value}, '
+                f'currency="{currency}")'
+            )
+        else:
+            self.emit_line("self.budget = None")
+        self.emit_line(f"self.timeout_seconds = {pipe.timeout_seconds!r}")
+        self.emit_line(f"self.schedule = {pipe.schedule!r}")
+        if not pipe.use_agents and not pipe.budget_config:
+            self.emit_line("pass")
+        self.dedent()
+
+        # Inline steps as methods (if any)
+        for step in pipe.inline_steps:
+            self.emit_line("")
+            # Inline steps aren't on an Agent class — they're plain async methods.
+            # We don't get cost tracking or checkpointing here; they're meant
+            # for orchestration glue like `compile_and_send`.
+            self.gen_inline_step(step)
+
+        # The run() coroutine — the actual orchestration.
+        self.emit_line("")
+        self.emit_line("async def run(self, initial_input=None):")
+        self.indent()
+        self.emit_line('"""Execute the pipeline. Returns the last node\'s output."""')
+        self.emit_line("results = {}")
+        self.emit_line("_prev = initial_input")
+
+        # The first edge's `from_node` is the entry point — we have to call
+        # it once before threading its output through subsequent nodes.
+        produced = set()
+        for i, edge in enumerate(pipe.edges):
+            if edge.from_node not in produced:
+                entry_call = self._pipeline_node_callable(edge.from_node, pipe)
+                self.emit_line("# entry node — call signature-checked at runtime")
+                self.emit_line(
+                    f"_prev = await self._call_node({entry_call}, _prev)"
+                )
+                self.emit_line(f"results[{edge.from_node!r}] = _prev")
+                produced.add(edge.from_node)
+            self._emit_pipeline_edge(edge, pipe, i)
+            produced.add(edge.to_node)
+
+        self.emit_line("return _prev")
+        self.dedent()  # end of run()
+
+        # Helper: call a node with _prev only if it accepts an argument.
+        # Indent level here is class-body (one above run).
+        self.emit_line("")
+        self.emit_line("async def _call_node(self, fn, prev):")
+        self.indent()
+        self.emit_line('"""Call a step. Pass prev only if the signature accepts it."""')
+        self.emit_line("import inspect")
+        self.emit_line("sig = inspect.signature(fn)")
+        self.emit_line("non_self = [p for p in sig.parameters.values() "
+                       "if p.kind != inspect.Parameter.VAR_KEYWORD]")
+        self.emit_line("if non_self:")
+        self.indent()
+        self.emit_line("return await fn(prev)")
+        self.dedent()
+        self.emit_line("return await fn()")
+        self.dedent()  # end of _call_node
+
+        self.dedent()  # end of class
+
+    def gen_inline_step(self, step: ast.StepDecl):
+        """Inline pipeline steps — plain async methods, no Agent infrastructure."""
+        params = ["self"]
+        for p in step.params:
+            params.append(f"{p.name}: {self.gen_type(p.type_expr)}")
+        ret = ""
+        if step.return_type:
+            ret = f" -> {self.gen_type(step.return_type)}"
+        self.emit_line(f"async def {step.name}({', '.join(params)}){ret}:")
+        self.indent()
+        if not step.body:
+            self.emit_line("pass")
+        for s in step.body:
+            self.gen_statement(s)
+        self.dedent()
+
+    def _emit_pipeline_edge(self, edge: ast.PipelineEdge, pipe: ast.PipelineDecl, i: int):
+        """Emit code that runs `to_node` with `_prev` as input."""
+        callable_expr = self._pipeline_node_callable(edge.to_node, pipe)
+        target_step_name = edge.to_node.split(".")[-1]
+        skip_on_failure = pipe.failure_handlers.get(target_step_name, "").startswith("skip")
+
+        if edge.op == "->":
+            if skip_on_failure:
+                self.emit_line("try:")
+                self.indent()
+                self.emit_line(f"_prev = await {callable_expr}(_prev)")
+                self.emit_line(f"results[{edge.to_node!r}] = _prev")
+                self.dedent()
+                self.emit_line("except Exception as _e:")
+                self.indent()
+                self.emit_line(f'print(f"  ⚠  skipping {target_step_name}: {{_e}}")')
+                self.dedent()
+            else:
+                self.emit_line(f"_prev = await {callable_expr}(_prev)")
+                self.emit_line(f"results[{edge.to_node!r}] = _prev")
+        elif edge.op == "=>":
+            # Parallel fan-out: _prev must be iterable
+            self.emit_line(f"# parallel fan-out into {edge.to_node}")
+            self.emit_line(
+                f"_prev = await asyncio.gather(*[{callable_expr}(item) for item in _prev])"
+            )
+            self.emit_line(f"results[{edge.to_node!r}] = _prev")
+        elif edge.op == "~>":
+            self.emit_line(f"# conditional ~> not yet honored; running unconditionally")
+            self.emit_line(f"_prev = await {callable_expr}(_prev)")
+            self.emit_line(f"results[{edge.to_node!r}] = _prev")
+        elif edge.op == "|>":
+            self.emit_line(f"# stream |> not yet honored; running as sequential")
+            self.emit_line(f"_prev = await {callable_expr}(_prev)")
+            self.emit_line(f"results[{edge.to_node!r}] = _prev")
+
+    def _pipeline_node_callable(self, node: str, pipe: ast.PipelineDecl) -> str:
+        """Resolve a node name to an awaitable callable.
+
+        `Agent.step`     -> self.Agent.step
+        `step` (no dot)  -> self.<UsedAgent>.step if exactly one used agent
+                            owns it, else `self.step` (inline step)
+        """
+        if "." in node:
+            agent, step = node.split(".", 1)
+            return f"self.{agent}.{step}"
+        # Look up inline step
+        inline_names = {s.name for s in pipe.inline_steps}
+        if node in inline_names:
+            return f"self.{node}"
+        # If exactly one used agent has this step, qualify it implicitly.
+        # Without import resolution we can't know which agent owns the step;
+        # default to the first used agent if any, else self.<node>.
+        if pipe.use_agents:
+            return f"self.{pipe.use_agents[0]}.{node}"
+        return f"self.{node}"
 
     def gen_tool_decl(self, tool: ast.ToolDecl):
         """Generate a tool adapter object accessible as <name>.<action>(...)."""

@@ -60,6 +60,39 @@ class StateField:
 
 
 @dataclass
+class PipelineDecl:
+    """A pipeline: a DAG of step calls across one or more agents.
+
+    Top-level declaration. See §2.5 and §12.1 of the spec.
+
+    `use_agents` lists agent type names that participate (`use GrantChecker`).
+    `edges` lists each `from -> to` flow with its operator.
+    `failure_handlers` map step names to recovery actions.
+    """
+    name: str = ""
+    budget_config: 'BudgetConfig | None' = None
+    timeout_seconds: float = 0.0
+    schedule: str = ""
+    use_agents: list = field(default_factory=list)         # list of str
+    edges: list = field(default_factory=list)              # list of PipelineEdge
+    failure_handlers: dict = field(default_factory=dict)   # step_name -> action
+    budget_handler: str = ""                               # action on budget exceeded
+    inline_steps: list = field(default_factory=list)       # list of StepDecl (defined inline)
+
+
+@dataclass
+class PipelineEdge:
+    """One arrow in a pipeline:  from_node OP to_node
+
+    OP is "->" (seq), "=>" (parallel fan-out), "~>" (conditional), "|>" (stream).
+    Nodes are either "step" or "AgentType.step".
+    """
+    from_node: str = ""
+    to_node: str = ""
+    op: str = "->"
+
+
+@dataclass
 class ToolDecl:
     """A tool declaration. Three forms — `kind` distinguishes them.
 

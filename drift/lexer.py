@@ -38,6 +38,7 @@ class TT(Enum):
     ARROW = auto()         # ->
     FAT_ARROW = auto()     # =>
     PIPE_ARROW = auto()    # |>
+    TILDE_ARROW = auto()   # ~>
     LBRACKET = auto()     # [
     RBRACKET = auto()     # ]
     PLUS = auto()
@@ -74,6 +75,7 @@ TWO_CHAR_OPS = {
     '->': TT.ARROW,
     '=>': TT.FAT_ARROW,
     '|>': TT.PIPE_ARROW,
+    '~>': TT.TILDE_ARROW,
     '>=': TT.GTE,
     '<=': TT.LTE,
     '==': TT.EQEQ,

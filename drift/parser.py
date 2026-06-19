@@ -123,6 +123,8 @@ class Parser:
                 return self.parse_define_verb()
             elif t.value == 'tool':
                 return self.parse_tool()
+            elif t.value == 'pipeline':
+                return self.parse_pipeline()
             elif t.value == 'import':
                 # Skip import lines for MVP
                 self.skip_to_next_statement()
@@ -163,6 +165,108 @@ class Parser:
         self.eat(TT.RBRACE)
         self.custom_verbs.add(verb.name)
         return verb
+
+    # ─── Pipeline ──────────────────────────────────────────────────
+
+    PIPELINE_OPS = {
+        TT.ARROW: "->",
+        TT.FAT_ARROW: "=>",
+        TT.TILDE_ARROW: "~>",
+        TT.PIPE_ARROW: "|>",
+    }
+
+    def parse_pipeline(self):
+        self.eat_ident('pipeline')
+        name = self.eat(TT.TYPE_IDENT).value
+        pipe = ast.PipelineDecl(name=name)
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+
+        while not self.check(TT.RBRACE):
+            t = self.peek()
+            if t.type == TT.IDENT and t.value == 'budget':
+                pipe.budget_config = self.parse_budget_config()
+            elif t.type == TT.IDENT and t.value == 'timeout':
+                self.eat()
+                self.eat(TT.COLON)
+                dur_tok = self.eat(TT.DURATION)
+                pipe.timeout_seconds = self._duration_to_seconds(dur_tok.value)
+            elif t.type == TT.IDENT and t.value == 'schedule':
+                self.eat()
+                self.eat(TT.COLON)
+                pipe.schedule = self.eat(TT.STRING).value
+            elif t.type == TT.IDENT and t.value == 'use':
+                self.eat()
+                pipe.use_agents.append(self.eat(TT.TYPE_IDENT).value)
+            elif t.type == TT.IDENT and t.value == 'on':
+                self._parse_pipeline_handler(pipe)
+            elif t.type == TT.IDENT and t.value == 'step':
+                # Inline step definition (the spec allows this in §12.1)
+                pipe.inline_steps.append(self.parse_step())
+            else:
+                # Edge: from_node OP to_node [OP to_node...]
+                self._parse_pipeline_edge(pipe)
+            self.skip_newlines()
+
+        self.eat(TT.RBRACE)
+        return pipe
+
+    def _duration_to_seconds(self, lit: str) -> float:
+        unit_map = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+        return float(lit[:-1]) * unit_map.get(lit[-1], 1.0)
+
+    def _parse_pipeline_edge(self, pipe: 'ast.PipelineDecl'):
+        from_node = self._parse_node_ref()
+        while self.peek().type in self.PIPELINE_OPS:
+            op_tok = self.eat()
+            op = self.PIPELINE_OPS[op_tok.type]
+            to_node = self._parse_node_ref()
+            pipe.edges.append(ast.PipelineEdge(
+                from_node=from_node, to_node=to_node, op=op,
+            ))
+            from_node = to_node  # chain: `a -> b -> c` becomes two edges
+
+    def _parse_node_ref(self) -> str:
+        """Parse `step` or `AgentType.step` and return as a string."""
+        t = self.peek()
+        if t.type == TT.TYPE_IDENT:
+            head = self.eat(TT.TYPE_IDENT).value
+            if self.check(TT.DOT):
+                self.eat(TT.DOT)
+                step = self.eat(TT.IDENT).value
+                return f"{head}.{step}"
+            return head
+        if t.type == TT.IDENT:
+            return self.eat(TT.IDENT).value
+        raise ParseError("Expected pipeline node (step name or Agent.step)", t)
+
+    def _parse_pipeline_handler(self, pipe: 'ast.PipelineDecl'):
+        """on failure in <step>: <action>   |   on budget exceeded: <action>"""
+        self.eat_ident('on')
+        t = self.peek()
+        if t.type == TT.IDENT and t.value == 'failure':
+            self.eat()
+            self.eat_ident('in')
+            step_name = self.eat(TT.IDENT).value
+            self.eat(TT.COLON)
+            action = self._read_handler_phrase()
+            pipe.failure_handlers[step_name] = action
+        elif t.type == TT.IDENT and t.value == 'budget':
+            self.eat()
+            self.eat_ident('exceeded')
+            self.eat(TT.COLON)
+            pipe.budget_handler = self._read_handler_phrase()
+        else:
+            raise ParseError("Expected 'failure in <step>' or 'budget exceeded'", t)
+
+    def _read_handler_phrase(self) -> str:
+        """Read the natural-language handler phrase up to the next newline."""
+        words = []
+        while (not self.at_end() and
+               self.peek().type not in (TT.NEWLINE, TT.RBRACE, TT.EOF)):
+            words.append(self.eat().value)
+        return " ".join(words)
 
     # ─── Tool ──────────────────────────────────────────────────────
 
