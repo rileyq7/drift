@@ -1130,8 +1130,10 @@ def get_provider(model: str = None):
     When a model name is provided, route by family:
       gpt-*/o1/o3/o4 → OpenAI
       claude-*       → Anthropic
-    Without a model hint, prefer Anthropic if its key is set, else OpenAI.
-    Mock is the final fallback (with a banner).
+    If the model family is identifiable but the matching key is missing,
+    fall back to mock (NOT to the other provider — sending claude-* to
+    OpenAI just produces a confusing 404). Without a model hint or
+    family, take whatever key is available.
     """
     if os.environ.get('DRIFT_USE_MOCK') == '1':
         print("  ℹ  Using mock provider (DRIFT_USE_MOCK=1)")
@@ -1140,12 +1142,19 @@ def get_provider(model: str = None):
     has_anthropic = bool(os.environ.get('ANTHROPIC_API_KEY'))
     has_openai = bool(os.environ.get('OPENAI_API_KEY'))
 
-    if model and _looks_openai(model) and has_openai:
-        return OpenAIProvider()
-    if model and _looks_anthropic(model) and has_anthropic:
-        return AnthropicProvider()
+    if model and _looks_openai(model):
+        if has_openai:
+            return OpenAIProvider()
+        print(f"  ℹ  Using mock provider — {model!r} needs OPENAI_API_KEY")
+        return MockProvider()
 
-    # No model hint or no matching key: take whatever is available.
+    if model and _looks_anthropic(model):
+        if has_anthropic:
+            return AnthropicProvider()
+        print(f"  ℹ  Using mock provider — {model!r} needs ANTHROPIC_API_KEY")
+        return MockProvider()
+
+    # No model family hint: take whatever is available.
     if has_anthropic:
         return AnthropicProvider()
     if has_openai:

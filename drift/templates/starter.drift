@@ -7,7 +7,7 @@ config {{
 }}
 
 agent {Name} {{
-  model: "claude-haiku"
+  model: "{model}"
   budget: $0.10 per run
 
   step greet(name: string) -> string {{

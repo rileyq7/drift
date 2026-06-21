@@ -404,6 +404,59 @@ def cmd_mcp(args):
     serve_stdio()
 
 
+_DEFAULT_MODELS = {
+    "openai": "gpt-5.4-nano",
+    "anthropic": "claude-haiku-4-5",
+    "mock": "gpt-5.4-nano",
+}
+
+
+def _pick_starter_model(args) -> str:
+    """Pick the model for `drift new`, in priority order:
+      1. --model flag (explicit override)
+      2. DRIFT_DEFAULT_MODEL env var
+      3. Whichever provider key is set in the environment
+      4. Interactive prompt (if stdin is a TTY)
+      5. Safe default (gpt-5.4-nano + mock fallback)
+    """
+    if args.model:
+        return args.model
+
+    env_default = os.environ.get("DRIFT_DEFAULT_MODEL")
+    if env_default:
+        return env_default
+
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+    if has_openai and not has_anthropic:
+        print(f"  ▸ detected OPENAI_API_KEY — using {_DEFAULT_MODELS['openai']}")
+        return _DEFAULT_MODELS["openai"]
+    if has_anthropic and not has_openai:
+        print(f"  ▸ detected ANTHROPIC_API_KEY — using {_DEFAULT_MODELS['anthropic']}")
+        return _DEFAULT_MODELS["anthropic"]
+
+    # Both keys set, or neither. Ask if we can.
+    if sys.stdin.isatty():
+        print()
+        print("  Which model should this agent use?")
+        print(f"    1) OpenAI       ({_DEFAULT_MODELS['openai']})")
+        print(f"    2) Anthropic    ({_DEFAULT_MODELS['anthropic']})")
+        print("    3) Custom       (type model name)")
+        print()
+        choice = input("  Choice [1]: ").strip() or "1"
+        if choice == "1":
+            return _DEFAULT_MODELS["openai"]
+        if choice == "2":
+            return _DEFAULT_MODELS["anthropic"]
+        if choice == "3":
+            custom = input("  Model name: ").strip()
+            return custom or _DEFAULT_MODELS["openai"]
+        # Anything else: fall through.
+
+    return _DEFAULT_MODELS["openai"]
+
+
 def cmd_new(args):
     """Scaffold a new starter project."""
     name = args.name
@@ -418,13 +471,14 @@ def cmd_new(args):
     target_dir.mkdir(exist_ok=True)
 
     pascal = "".join(p.capitalize() for p in name.replace("-", "_").split("_"))
+    model = _pick_starter_model(args)
 
     tpl_dir = Path(__file__).parent / "templates"
     starter_src = (tpl_dir / "starter.drift").read_text()
     env_src = (tpl_dir / "env.example").read_text()
 
     drift_file = target_dir / f"{name}.drift"
-    drift_file.write_text(starter_src.format(name=name, Name=pascal))
+    drift_file.write_text(starter_src.format(name=name, Name=pascal, model=model))
     (target_dir / ".env.example").write_text(env_src)
 
     print(f"  ✓ Created {drift_file}")
@@ -449,6 +503,7 @@ def main():
 
     p_new = subparsers.add_parser('new', help='Scaffold a new starter project')
     p_new.add_argument('name', help='Project name (creates a directory of this name)')
+    p_new.add_argument('--model', help='Default model for the starter agent (e.g. gpt-5.4-nano, claude-haiku-4-5)')
     p_new.set_defaults(func=cmd_new)
 
     p_run = subparsers.add_parser('run', help='Transpile and execute a .drift file')

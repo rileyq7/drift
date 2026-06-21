@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drift-lang"
-version = "0.1.0"
+version = "0.1.1"
 description = "An intent-based language for agentic systems — write agents in English, run them as async Python."
 readme = "README.md"
 requires-python = ">=3.10"
