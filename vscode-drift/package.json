@@ -1,8 +1,8 @@
 {
   "name": "drift-lang",
-  "displayName": "Drift",
+  "displayName": "Drift Language",
   "description": "Syntax highlighting for the Drift intent-based agent language.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "rileyq7",
   "license": "MIT",
   "icon": "icons/drift-icon.png",

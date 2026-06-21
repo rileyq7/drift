@@ -49,3 +49,9 @@ checkpoints/
 *.vsix
 vscode-drift/node_modules/
 
+.vercel
+
+# Next.js
+apps/web/.next/
+apps/web/node_modules/
+apps/web/out/

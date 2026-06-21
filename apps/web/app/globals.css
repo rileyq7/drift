@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  /* Sage + eggshell palette */
+  --color-cream: #f4eee0;
+  --color-cream-soft: #ede5d2;
+  --color-cream-deep: #e2d8be;
+  --color-sage: #7b8a6b;
+  --color-sage-deep: #5a6a4e;
+  --color-sage-dark: #3f4a36;
+  --color-sage-soft: #a4b196;
+  --color-ink: #2a2a26;
+  --color-ink-soft: #4d4d47;
+  --color-ink-muted: #7c7c72;
+
+  /* Code colors (lean, low-contrast on cream) */
+  --color-syn-kw: #6b5b3a;
+  --color-syn-str: #4e7548;
+  --color-syn-typ: #8a5a2b;
+  --color-syn-com: #95907e;
+  --color-syn-num: #8a5a2b;
+
+  --font-display: "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+}
+
+html, body {
+  background: var(--color-cream);
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--color-sage-soft);
+  color: var(--color-ink);
+}
+
+/* Smooth scrolling for anchor links */
+html { scroll-behavior: smooth; }
