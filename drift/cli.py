@@ -52,6 +52,31 @@ def _print_parse_error(file: str, source: str, e: ParseError):
     sys.stderr.write(_format_source_error(file, source, tok.line, tok.col, msg, "Parse"))
 
 
+def _print_runtime_error(drift_file: str, e: Exception, show_trace: bool = False):
+    import traceback
+    py_file = str(Path(drift_file).with_suffix('.py'))
+    kind = type(e).__name__
+    sys.stderr.write(f"\n  ✗ Runtime error ({kind}): {e}\n")
+    sys.stderr.write(f"    → while executing {drift_file}\n")
+
+    if show_trace:
+        sys.stderr.write("\n  Traceback (generated Python frames):\n")
+        traceback.print_exc()
+        return
+
+    tb = traceback.extract_tb(e.__traceback__)
+    frames = [f for f in tb if f.filename == py_file]
+    if frames:
+        last = frames[-1]
+        sys.stderr.write(
+            f"    at generated line {last.lineno} ({last.name}): {last.line}\n"
+        )
+    sys.stderr.write(
+        f"\n  Hint: inspect {py_file} for the generated Python, "
+        f"or re-run with --trace for the full traceback.\n\n"
+    )
+
+
 def read_source(path: str) -> str:
     if not os.path.exists(path):
         sys.stderr.write(f"\n  ✗ File not found: {path}\n\n")
@@ -220,9 +245,7 @@ def cmd_run(args):
         _print_parse_error(args.file, source, e)
         sys.exit(1)
     except Exception as e:
-        sys.stderr.write(f"\n  ✗ Runtime error: {e}\n\n")
-        import traceback
-        traceback.print_exc()
+        _print_runtime_error(args.file, e, show_trace=args.trace)
         sys.exit(1)
 
 
@@ -277,6 +300,7 @@ def main():
     p_run.add_argument('--step', help='Specific step to run')
     p_run.add_argument('--agent', help='Specific agent to run')
     p_run.add_argument('--input', help='JSON input string')
+    p_run.add_argument('--trace', action='store_true', help='Show full Python traceback on runtime errors')
     p_run.set_defaults(func=cmd_run)
 
     p_check = subparsers.add_parser('check', help='Validate syntax without running')

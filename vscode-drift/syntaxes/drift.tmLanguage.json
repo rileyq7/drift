@@ -1,0 +1,128 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Drift",
+  "scopeName": "source.drift",
+  "fileTypes": ["drift"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#intent-verbs" },
+    { "include": "#types" },
+    { "include": "#literals" },
+    { "include": "#operators" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "match": "--.*$", "name": "comment.line.double-dash.drift" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.drift",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "match": "\\\\.", "name": "constant.character.escape.drift" },
+            { "match": "\\{[a-zA-Z_][a-zA-Z0-9_]*\\}", "name": "variable.other.interpolation.drift" }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(agent|schema|config|step|state|memory|model|tool|pipeline|import|from|as|define|verb)\\b",
+          "name": "keyword.declaration.drift"
+        },
+        {
+          "match": "\\b(if|else|let|return|respond|escalate|for|each|in|parallel|cached|manual|silent|while)\\b",
+          "name": "keyword.control.drift"
+        },
+        {
+          "match": "\\b(attempt|recover|retry|fail|on)\\b",
+          "name": "keyword.control.exception.drift"
+        },
+        {
+          "match": "\\b(remember|recall|deja_vu|forget|tagged|older|than|where|match)\\b",
+          "name": "keyword.other.memory.drift"
+        },
+        {
+          "match": "\\b(confident|prefer|fallback|never|upgrade|when|stream|then|budget|per|run)\\b",
+          "name": "keyword.other.routing.drift"
+        },
+        {
+          "match": "\\b(python|mcp|rest|dendric)\\b",
+          "name": "support.type.drift"
+        },
+        {
+          "match": "\\b(true|false|null)\\b",
+          "name": "constant.language.drift"
+        }
+      ]
+    },
+    "intent-verbs": {
+      "patterns": [
+        {
+          "match": "\\b(classify|extract|summarize|rate|generate|rewrite|answer|compare|decide|translate|match)\\b",
+          "name": "support.function.intent.drift"
+        },
+        {
+          "match": "\\b(against|using|considering|with|to)\\b",
+          "name": "keyword.other.clause.drift"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "match": "\\b(string|int|float|bool|list|dict|any)\\b",
+          "name": "support.type.builtin.drift"
+        },
+        {
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\b",
+          "name": "entity.name.type.drift"
+        }
+      ]
+    },
+    "literals": {
+      "patterns": [
+        {
+          "match": "\\$[0-9]+(\\.[0-9]+)?",
+          "name": "constant.numeric.currency.drift"
+        },
+        {
+          "match": "\\b[0-9]+(ms|s|m|h|d)\\b",
+          "name": "constant.numeric.duration.drift"
+        },
+        {
+          "match": "\\b[0-9]+(\\.[0-9]+)?\\b",
+          "name": "constant.numeric.drift"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "match": "->|=>|~>|\\|>", "name": "keyword.operator.pipeline.drift" },
+        { "match": "==|!=|<=|>=|<|>", "name": "keyword.operator.comparison.drift" },
+        { "match": "=", "name": "keyword.operator.assignment.drift" },
+        { "match": "\\+|\\-|\\*|/", "name": "keyword.operator.arithmetic.drift" }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": { "1": { "name": "entity.name.function.drift" } }
+        },
+        {
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b",
+          "name": "variable.other.drift"
+        }
+      ]
+    }
+  }
+}
