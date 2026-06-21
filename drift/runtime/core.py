@@ -872,21 +872,117 @@ class AnthropicProvider:
         )
 
 
-def get_provider():
-    """Get the best available provider.
+class OpenAIProvider:
+    """Real LLM provider using the OpenAI Chat Completions API."""
 
-    Honors DRIFT_USE_MOCK=1 to force the mock provider even when an API key
-    is present — useful for offline development and tests.
+    def __init__(self):
+        self.api_key = os.environ.get('OPENAI_API_KEY')
+        if not self.api_key:
+            raise DriftError(
+                "OPENAI_API_KEY not set. Use MockProvider or set the env var."
+            )
+        self.base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
+
+    async def call(self, model: str, system: str, prompt: str,
+                   output_schema=None) -> tuple[str, int, int]:
+        import httpx
+
+        # Strip a leading "openai/" if a user wrote it that way.
+        api_model = MODEL_REGISTRY.get(model, model)
+        if api_model.startswith('openai/'):
+            api_model = api_model.split('/', 1)[1]
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": api_model,
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                    timeout=60.0,
+                )
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            raise ModelUnavailable(
+                f"Network error reaching OpenAI for {model}: {e}", model=model
+            )
+
+        status = response.status_code
+        if status == 200:
+            data = response.json()
+            text = data['choices'][0]['message']['content'] or ""
+            usage = data.get('usage', {})
+            return text, usage.get('prompt_tokens', 0), usage.get('completion_tokens', 0)
+
+        body = response.text[:200]
+        if status in (401, 403):
+            raise AuthError(f"OpenAI auth failed ({status}): {body}")
+        if status == 429:
+            retry_after = response.headers.get('retry-after')
+            try:
+                retry_after = float(retry_after) if retry_after else None
+            except ValueError:
+                retry_after = None
+            raise RateLimited(
+                f"Rate limited by OpenAI ({status}): {body}",
+                model=model,
+                retry_after=retry_after,
+            )
+        if status == 404:
+            raise ModelUnavailable(
+                f"OpenAI returned 404 for model {api_model!r}: {body}", model=model
+            )
+        raise ModelUnavailable(
+            f"OpenAI API error ({status}) for {model}: {body}", model=model
+        )
+
+
+def _looks_openai(model: str) -> bool:
+    m = (model or "").lower()
+    return m.startswith(("gpt-", "openai/", "o1", "o3", "o4"))
+
+
+def _looks_anthropic(model: str) -> bool:
+    m = (model or "").lower()
+    return m.startswith(("claude", "anthropic/"))
+
+
+def get_provider(model: str = None):
+    """Get the best provider for a given model.
+
+    DRIFT_USE_MOCK=1 forces the mock provider regardless of keys.
+    When a model name is provided, route by family:
+      gpt-*/o1/o3/o4 → OpenAI
+      claude-*       → Anthropic
+    Without a model hint, prefer Anthropic if its key is set, else OpenAI.
+    Mock is the final fallback (with a banner).
     """
     if os.environ.get('DRIFT_USE_MOCK') == '1':
         print("  ℹ  Using mock provider (DRIFT_USE_MOCK=1)")
         return MockProvider()
-    if os.environ.get('ANTHROPIC_API_KEY'):
-        try:
-            return AnthropicProvider()
-        except Exception:
-            pass
-    print("  ℹ  Using mock provider (set ANTHROPIC_API_KEY for real LLM calls)")
+
+    has_anthropic = bool(os.environ.get('ANTHROPIC_API_KEY'))
+    has_openai = bool(os.environ.get('OPENAI_API_KEY'))
+
+    if model and _looks_openai(model) and has_openai:
+        return OpenAIProvider()
+    if model and _looks_anthropic(model) and has_anthropic:
+        return AnthropicProvider()
+
+    # No model hint or no matching key: take whatever is available.
+    if has_anthropic:
+        return AnthropicProvider()
+    if has_openai:
+        return OpenAIProvider()
+
+    print("  ℹ  Using mock provider (set ANTHROPIC_API_KEY or OPENAI_API_KEY for real LLM calls)")
     return MockProvider()
 
 
@@ -1000,7 +1096,11 @@ class Agent:
         self.cost_tracker = CostTracker(self.budget)
         self.checkpoint = Checkpoint(name)
         self.memory = memory
-        self._provider = get_provider()
+        # Hint the provider with the agent's default model so a project with
+        # only an OpenAI key gets the OpenAI provider when its first model
+        # is `gpt-*` / `o*`.
+        _hint_model = getattr(self.model, 'prefer', None) or getattr(self.model, 'default', None)
+        self._provider = get_provider(_hint_model)
         self._outputs: list[str] = []
 
     async def intent(self, verb: str, input_data: Any = None,

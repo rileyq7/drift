@@ -62,9 +62,13 @@ def _apply_env_file(env_path: Path) -> int:
 
 
 def _provider_name() -> str:
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    has_a = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    has_o = bool(os.environ.get("OPENAI_API_KEY"))
+    if has_a and has_o:
+        return "anthropic + openai (auto-routed by model)"
+    if has_a:
         return "anthropic"
-    if os.environ.get("OPENAI_API_KEY"):
+    if has_o:
         return "openai"
     return "mock"
 
