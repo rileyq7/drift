@@ -15,13 +15,17 @@ const SCRIPT: Step[] = [
   { t: "pause", ms: 400 },
   { t: "line", v: `<span class="dim">Successfully installed drift-lang-0.1.1</span>`, d: 600 },
   { t: "line", v: "" },
+
+  // ── Run 1 invocation ──
   { t: "prompt", v: "$ " },
-  { t: "type", v: "python examples/grant_checker_compare_demo.py", s: 24 },
+  { t: "type", v: `drift run grant_checker.drift --input '{"company":"TechCo, 15 emp, 18mo"}'`, s: 22 },
   { t: "pause", ms: 700 },
   { t: "line", v: "" },
-
+  { t: "line", v: `<span class="dim">  ▸ provider: openai · loaded 1 var from .env</span>`, d: 30 },
+  { t: "line", v: `<span class="dim">  ✓ Transpiled → grant_checker.py</span>`, d: 50 },
+  { t: "line", v: "" },
   { t: "line", v: `<span class="sep">══════════════════════════════════════════════════════════════════════</span>`, d: 20 },
-  { t: "line", v: `<span class="head">  Drift + Dendric — Two-Run Memory Demo (real LLM, real comparison)</span>`, d: 20 },
+  { t: "line", v: `<span class="head">  Drift — Running GrantChecker</span>`, d: 20 },
   { t: "line", v: `<span class="sep">══════════════════════════════════════════════════════════════════════</span>`, d: 20 },
   { t: "line", v: "" },
 
@@ -39,6 +43,14 @@ const SCRIPT: Step[] = [
   { t: "line", v: `    <span class="note">← memory was truly empty going into Run 1</span>`, d: 60 },
   { t: "line", v: "" },
   { t: "pause", ms: 1600 },
+
+  // ── Run 2 invocation (separate process, same persona memory) ──
+  { t: "prompt", v: "$ " },
+  { t: "type", v: `drift run grant_checker.drift --input '{"company":"MedAI, 12 emp, 20mo"}'`, s: 22 },
+  { t: "pause", ms: 700 },
+  { t: "line", v: "" },
+  { t: "line", v: `<span class="note">  ▸ same persona key — recalling prior evaluations from Dendric</span>`, d: 60 },
+  { t: "line", v: "" },
 
   // Run 2 — the citation moment
   { t: "line", v: `<span class="label">[Run 2]</span> MedAI Ltd — UK-based healthcare AI startup, 12 employees,`, d: 150 },
