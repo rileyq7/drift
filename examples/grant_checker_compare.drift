@@ -1,0 +1,63 @@
+-- grant_checker_compare.drift
+--
+-- Demonstrates Drift + Dendric memory at the LLM-reasoning level:
+-- Run 2 visibly cites Run 1 by name and makes side-by-side comparisons.
+--
+-- The key piece is the custom `compare_score` verb, which instructs the
+-- model to reference prior evaluations in its reasoning. Without that
+-- instruction the plumbing still works — past memories reach the prompt
+-- — but the model may not visibly use them. This example makes the
+-- comparison explicit.
+--
+-- Paired with examples/grant_checker_compare_demo.py which drives the
+-- two-run flow and prints both reasoning blocks.
+--
+-- Run (needs Postgres+pgvector, OPENAI_API_KEY for embeddings + LLM):
+--   docker compose -f Dendric/docker-compose.yml up -d db
+--   set -a && source .env && set +a
+--   DATABASE_URL=postgresql://postgres:postgres@localhost:5433/dendric \
+--     python examples/grant_checker_compare_demo.py
+
+config {
+  name: "Grant Eligibility Checker (with citation)"
+  version: "1.0.0"
+}
+
+schema FitScore {
+  company_name: string
+  overall_score: number between 0 and 100
+  recommendation: one of "strong fit", "possible fit", "weak fit", "no fit"
+  reasoning: string
+  confidence: number between 0 and 1
+}
+
+-- Custom verb: instructs the model to cite prior evaluations by name
+-- and make explicit comparisons. The default `rate` verb produces
+-- well-formed scores but won't reliably reference Run 1 in Run 2.
+define verb compare_score {
+  pattern: "evaluate {target} given prior {context}"
+  prompt: "Score this grant application. CRITICALLY IMPORTANT: prior evaluations of similar companies are provided as CONTEXT. You MUST reference the prior evaluations by company name in your reasoning — explicitly compare the current applicant to them. State whether the current applicant is stronger, weaker, or similar, and why. Return valid JSON matching the schema."
+  output: FitScore
+  temperature: 0.3
+}
+
+agent GrantChecker {
+  model: "gpt-5.4"
+  memory: dendric("grant_history_compare")
+  budget: £5 per run
+
+  step evaluate(company_profile: string, call_text: string) -> FitScore {
+    -- Pull prior evaluations for similar companies
+    let past = recall similar evaluations for company_profile
+
+    -- Score with explicit comparison. The `using past` clause threads
+    -- prior memory into the prompt's CONTEXT block, where the custom
+    -- verb's instructions tell the model to cite it.
+    let score = compare_score company_profile against call_text using past as FitScore
+
+    -- Persist the verdict so the NEXT run can recall it.
+    remember score tagged "healthcare innovate_uk"
+
+    return score
+  }
+}

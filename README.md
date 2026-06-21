@@ -97,7 +97,9 @@ See [`examples/`](./examples) for working `.drift` programs and their generated 
 - `confident_demo.drift` — `confident<T>` branching
 - `grant_checker.drift` — end-to-end intent + structured return
 - `inbox_sorter.drift` — `for each … parallel` triage
+- `inbox_triage_live.drift` — the canonical 30-line demo (real-LLM verified: 5 emails, 1.82s, $0.0092)
 - `grant_checker_with_memory.drift` — Dendric-backed long-term memory
+- `grant_checker_compare.drift` — citation-proof memory: Run 2's LLM reasoning cites Run 1 by name and makes side-by-side comparisons
 
 ## Status
 

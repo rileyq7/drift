@@ -15,7 +15,10 @@ from pathlib import Path
 import pytest
 
 
-EXAMPLE_NAMES = ["hello", "inbox_sorter", "grant_checker", "confident_demo"]
+EXAMPLE_NAMES = [
+    "hello", "inbox_sorter", "grant_checker", "confident_demo",
+    "inbox_triage_live", "grant_checker_compare",
+]
 
 
 @pytest.mark.parametrize("name", EXAMPLE_NAMES)
