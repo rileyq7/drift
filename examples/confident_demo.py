@@ -17,6 +17,8 @@ from drift.runtime import (
     ModelUnavailable, RateLimited, AuthError,
 )
 
+__drift_source__ = "<drift_file>"
+
 # ── Config ──
 DRIFT_CONFIG = {
     "name": "Confident Demo",
@@ -55,4 +57,3 @@ class Triager(Agent):
             _result = "needs_review"
             self.checkpoint.save('triage', _result)
             return _result
-

@@ -66,7 +66,7 @@ The lexer distinguishes them. Using PascalCase where snake_case is expected (or 
 
 Primitive: `string`, `int`, `float`, `number`, `bool`.
 
-Generic containers: `list<T>`, `dict<K, V>`, `optional<T>`, `set<T>`, `tuple<T1, T2>`. No spaces inside the `<...>`.
+Generic containers: `list<T>`, `map<K, V>` (not `dict`), `optional<T>`. No spaces inside the `<...>`. The parser does not currently accept `dict<...>`, `set<...>`, or `tuple<...>` — use `map<...>` for key/value pairs and `list<...>` for everything else.
 
 Schema-defined types: any `PascalCase` name declared via `schema Name { ... }`.
 

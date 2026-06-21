@@ -105,23 +105,31 @@ def _print_runtime_error(drift_file: str, e: Exception, show_trace: bool = False
     py_file = str(Path(drift_file).with_suffix('.py'))
     kind = type(e).__name__
     sys.stderr.write(f"\n  ✗ Runtime error ({kind}): {e}\n")
-    sys.stderr.write(f"    → while executing {drift_file}\n")
+
+    agent = getattr(e, '_drift_agent', None)
+    step = getattr(e, '_drift_step', None)
+    if agent and step:
+        sys.stderr.write(f"    → step '{step}' of agent '{agent}' in {drift_file}\n")
+    elif step:
+        sys.stderr.write(f"    → step '{step}' in {drift_file}\n")
+    else:
+        sys.stderr.write(f"    → in {drift_file}\n")
+
+    tb = traceback.extract_tb(e.__traceback__)
+    py_frames = [f for f in tb if f.filename == py_file]
+    if py_frames:
+        last = py_frames[-1]
+        sys.stderr.write(
+            f"    → generated {py_file}:{last.lineno}\n        {last.line.strip()}\n"
+        )
 
     if show_trace:
         sys.stderr.write("\n  Traceback (generated Python frames):\n")
         traceback.print_exc()
         return
 
-    tb = traceback.extract_tb(e.__traceback__)
-    frames = [f for f in tb if f.filename == py_file]
-    if frames:
-        last = frames[-1]
-        sys.stderr.write(
-            f"    at generated line {last.lineno} ({last.name}): {last.line}\n"
-        )
     sys.stderr.write(
-        f"\n  Hint: inspect {py_file} for the generated Python, "
-        f"or re-run with --trace for the full traceback.\n\n"
+        f"\n  Hint: re-run with --trace for the full Python traceback.\n\n"
     )
 
 
@@ -293,13 +301,40 @@ def _run_once(args):
 
         from drift.runtime.core import Agent, run_agent
         agents = {}
+        pipelines = {}
         for name in dir(module):
             obj = getattr(module, name)
             if isinstance(obj, type) and issubclass(obj, Agent) and obj is not Agent:
                 agents[name] = obj
+            # Pipelines are plain classes (not Agent subclasses) with an
+            # async `run` method. Detect by shape.
+            elif isinstance(obj, type) and not name.startswith('_') and hasattr(obj, 'run'):
+                if obj is Agent:
+                    continue
+                run_attr = getattr(obj, 'run', None)
+                if run_attr is not None and asyncio.iscoroutinefunction(run_attr):
+                    pipelines[name] = obj
+
+        if args.pipeline:
+            pipe_cls = pipelines.get(args.pipeline)
+            if not pipe_cls:
+                avail = ', '.join(pipelines) if pipelines else '(none)'
+                sys.stderr.write(
+                    f"\n  ✗ Pipeline '{args.pipeline}' not found. Available: {avail}\n\n"
+                )
+                return 1
+            initial = json.loads(args.input) if args.input else None
+            asyncio.run(pipe_cls().run(initial_input=initial))
+            return 0
 
         if not agents:
-            sys.stderr.write("\n  ✗ No agents found in the generated code.\n\n")
+            if pipelines:
+                sys.stderr.write(
+                    f"\n  ✗ No agents found, but pipelines are: {', '.join(pipelines)}.\n"
+                    f"    Re-run with --pipeline <name>.\n\n"
+                )
+            else:
+                sys.stderr.write("\n  ✗ No agents found in the generated code.\n\n")
             return 1
 
         if args.agent:
@@ -364,6 +399,11 @@ def cmd_run(args):
         sys.exit(0)
 
 
+def cmd_mcp(args):
+    from drift.mcp_server import serve_stdio
+    serve_stdio()
+
+
 def cmd_new(args):
     """Scaffold a new starter project."""
     name = args.name
@@ -416,6 +456,7 @@ def main():
     p_run.add_argument('--step', help='Specific step to run')
     p_run.add_argument('--agent', help='Specific agent to run')
     p_run.add_argument('--input', help='JSON input string')
+    p_run.add_argument('--pipeline', help='Run a declared pipeline by name (instead of an agent)')
     p_run.add_argument('--trace', action='store_true', help='Show full Python traceback on runtime errors')
     p_run.add_argument('--watch', action='store_true', help='Re-run when the .drift file changes')
     p_run.set_defaults(func=cmd_run)
@@ -442,6 +483,9 @@ def main():
     p_parse = subparsers.add_parser('parse', help='Show AST (debug)')
     p_parse.add_argument('file', help='Path to .drift file')
     p_parse.set_defaults(func=cmd_parse)
+
+    p_mcp = subparsers.add_parser('mcp', help='Run as an MCP stdio server (drift_check / drift_transpile / drift_run)')
+    p_mcp.set_defaults(func=cmd_mcp)
 
     args = parser.parse_args()
     args.func(args)

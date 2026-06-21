@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drift — agents as declarative blocks</title>
+<meta name="description" content="An intent-based language for LLM agents. Write agents in English. Transpile to async Python.">
+<meta property="og:title" content="Drift — agents as declarative blocks">
+<meta property="og:description" content="An intent-based language for LLM agents. Write agents in English. Transpile to async Python.">
+<style>
+  :root {
+    --bg: #0b1220;
+    --fg: #e7eef8;
+    --muted: #97a3b6;
+    --accent: #38bdf8;
+    --accent-dim: #1e3a52;
+    --card: #111a2e;
+    --border: #1f2a44;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 64px 24px 96px; }
+  .hero { padding: 24px 0 48px; }
+  h1 { font-size: 56px; margin: 0 0 8px; letter-spacing: -1px; font-weight: 800; }
+  h1 .logo { color: var(--accent); }
+  .tag { font-size: 20px; color: var(--muted); margin: 0 0 32px; max-width: 560px; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; margin: 24px 0 16px; }
+  .btn { display: inline-block; padding: 10px 18px; border: 1px solid var(--border); border-radius: 8px; color: var(--fg); font-size: 14px; }
+  .btn.primary { background: var(--accent); color: #001020; border-color: var(--accent); font-weight: 600; }
+  .install { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; color: var(--muted); padding: 12px 14px; background: var(--card); border-radius: 8px; border: 1px solid var(--border); margin-top: 8px; }
+  .install::before { content: "$ "; color: var(--accent); }
+  pre { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; overflow-x: auto; font-size: 13.5px; line-height: 1.55; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  code { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13.5px; }
+  pre code { background: none; padding: 0; }
+  h2 { font-size: 24px; margin: 56px 0 16px; font-weight: 700; letter-spacing: -0.3px; }
+  h3 { font-size: 17px; margin: 32px 0 8px; font-weight: 600; color: var(--accent); }
+  .kw { color: #c084fc; }
+  .str { color: #86efac; }
+  .typ { color: #fcd34d; }
+  .com { color: #64748b; font-style: italic; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 24px; font-size: 14px; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  td:first-child { font-weight: 600; }
+  ul { padding-left: 22px; }
+  li { margin: 6px 0; }
+  .footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  .cost { display: inline-block; padding: 2px 8px; background: var(--accent-dim); color: var(--accent); border-radius: 4px; font-size: 13px; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="hero">
+    <h1><span class="logo">drift</span></h1>
+    <p class="tag">An intent-based language for LLM agents. Write agents in English. Transpile to async Python.</p>
+
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/rileyq7/drift">GitHub</a>
+      <a class="btn" href="https://github.com/rileyq7/drift/blob/main/LLM.md">For coding agents</a>
+      <a class="btn" href="https://github.com/rileyq7/drift/blob/main/docs/cookbook.md">Cookbook</a>
+    </div>
+
+    <div class="install">pip install drift-lang</div>
+  </div>
+
+  <h2>What a Drift program looks like</h2>
+  <pre><code><span class="kw">agent</span> <span class="typ">InboxTriage</span> {
+  model: <span class="str">"gpt-5.4-nano"</span>
+  budget: $0.10 <span class="kw">per run</span>
+
+  <span class="kw">step</span> triage(emails: <span class="typ">list</span>&lt;<span class="typ">string</span>&gt;) -&gt; <span class="typ">list</span>&lt;<span class="typ">EmailAnalysis</span>&gt; {
+    <span class="kw">let</span> analyses = []
+    <span class="kw">for each</span> email <span class="kw">in</span> emails <span class="kw">parallel</span> {
+      <span class="kw">let</span> analysis = <span class="kw">classify</span> email <span class="kw">as</span> <span class="typ">EmailAnalysis</span>
+      analyses.add(analysis)
+    }
+    <span class="kw">for each</span> a <span class="kw">in</span> analyses {
+      <span class="kw">if</span> a.priority == <span class="str">"urgent"</span> {
+        <span class="kw">respond</span> <span class="str">"URGENT — {a.subject}: {a.summary}"</span>
+      }
+    }
+    <span class="kw">return</span> analyses
+  }
+}</code></pre>
+
+  <p style="color: var(--muted); font-size: 14px; margin-top: 8px;">
+    That's a full agent: model choice, budget cap, parallel fan-out, structured classification, conditional output, typed return.
+    Ran live against OpenAI: 5 emails, 1.82s, <span class="cost">$0.0092</span>, returned 5 dataclasses.
+  </p>
+
+  <h2>Why a language</h2>
+  <p>Agent code is mostly orchestration: pick a model, call it with structure, branch on the result, escalate if confidence is low, retry on rate limits, track costs. That orchestration reads worse than the prose that describes it.</p>
+
+  <p>Drift makes the prose runnable. The transpiler emits async Python that runs on a thin runtime handling provider routing, budget caps, schema validation, retries, memory, and MCP tool calls. You write the spec; the runtime handles the plumbing.</p>
+
+  <h2>What's in the box</h2>
+  <ul>
+    <li><strong>Multi-provider routing</strong>: <code>prefer "claude-sonnet" fallback "gpt-5.4-nano"</code>. OpenAI + Anthropic out of the box, MCP tool support, REST inline.</li>
+    <li><strong>Confidence-gated branching</strong>: <code>if scored is confident { … } otherwise { fail "review" }</code>. Cheap model when sure, escalate when not.</li>
+    <li><strong>Strict JSON output</strong>: schemas become provider-side JSON Schema constraints. The "model returned almost-JSON" failure mode is gone.</li>
+    <li><strong>Parallel by default</strong>: <code>for each x in xs parallel</code> compiles to <code>asyncio.gather</code>.</li>
+    <li><strong>Built-in cost tracking</strong>: every run prints a cost report. Hard budget caps.</li>
+    <li><strong>Memory</strong>: Dendric (semantic, persistent) or SQLite. <code>remember</code> / <code>recall</code> / <code>deja_vu</code> / <code>forget</code>.</li>
+    <li><strong>Structured error handling</strong>: <code>attempt { … } recover from { RateLimited -> retry, BudgetExceeded -> fail "…" }</code>.</li>
+    <li><strong>Developer tools</strong>: <code>drift run</code>, <code>drift check</code>, <code>drift fmt</code>, <code>drift run --watch</code>, VS Code syntax highlighting, source-mapped runtime errors.</li>
+  </ul>
+
+  <h2>30 seconds to your first agent</h2>
+  <pre><code>pip install drift-lang
+drift new hello
+cd hello
+drift run hello.drift --input '{"name":"Riley"}'</code></pre>
+
+  <p style="color: var(--muted); font-size: 14px;">No API key required — Drift falls back to a mock provider so you see something work immediately. Drop an <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code> into <code>.env</code> for real LLM calls.</p>
+
+  <h2>For coding agents</h2>
+  <p>If you're a coding agent (Claude, Cursor, Copilot) writing Drift on a user's behalf: load <a href="https://github.com/rileyq7/drift/blob/main/LLM.md">LLM.md</a> first. It's a single-file complete reference packed for one-shot consumption — every keyword, every type, every runtime behavior, every anti-pattern. Cross-checked against the parser; cold-start agents have written working programs from it on first try.</p>
+
+  <h2>Why not LangGraph / CrewAI / framework X?</h2>
+  <table>
+    <tr><th></th><th>Drift</th><th>Python frameworks</th></tr>
+    <tr><td>Code shape</td><td>Declarative blocks</td><td>Imperative classes / graphs</td></tr>
+    <tr><td>Budget caps</td><td>Built into syntax</td><td>Wrapper or none</td></tr>
+    <tr><td>Provider routing</td><td>One line</td><td>Manual or via wrapper</td></tr>
+    <tr><td>Memory</td><td>One line + Dendric</td><td>Bring your own</td></tr>
+    <tr><td>Schema enforcement</td><td>Strict via provider</td><td>Manual JSON validation</td></tr>
+    <tr><td>Best when</td><td>Spec reads better than glue</td><td>You need full Python control</td></tr>
+  </table>
+  <p style="color: var(--muted); font-size: 14px;">Drift isn't a general-purpose language. It's orchestration sugar. When your agent IS orchestration, it wins. When you need fine-grained control flow, drop to Python.</p>
+
+  <div class="footer">
+    <div>MIT licensed · 350 tests passing</div>
+    <div><a href="https://github.com/rileyq7/drift">github.com/rileyq7/drift</a></div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -109,6 +109,8 @@ class CodeGenerator:
             '    DriftError, StepFailed, SchemaViolation, BudgetExceeded,',
             '    ModelUnavailable, RateLimited, AuthError,',
             ')',
+            '',
+            '__drift_source__ = "<drift_file>"',
         )
 
     # ─── Config ────────────────────────────────────────────────────

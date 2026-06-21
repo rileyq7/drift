@@ -17,6 +17,8 @@ from drift.runtime import (
     ModelUnavailable, RateLimited, AuthError,
 )
 
+__drift_source__ = "<drift_file>"
+
 # ── Config ──
 DRIFT_CONFIG = {
     "name": "Grant Eligibility Checker (with memory)",

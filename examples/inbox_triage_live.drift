@@ -1,0 +1,36 @@
+-- inbox_triage_live.drift — the canonical Drift demo.
+--
+-- Classifies a list of emails in parallel, returns a triaged report.
+-- Run:  drift run inbox_triage_live.drift --input "$(cat sample_inbox.json)"
+
+config {
+  name: "Inbox Triage"
+  version: "0.1.0"
+}
+
+schema EmailAnalysis {
+  subject: string
+  priority: one of "urgent", "normal", "low"
+  category: one of "billing", "support", "sales", "spam", "personal"
+  summary: string
+  suggested_action: string
+}
+
+agent InboxTriage {
+  model: "gpt-5.4-nano"
+  budget: $0.10 per run
+
+  step triage(emails: list<string>) -> list<EmailAnalysis> {
+    let analyses = []
+    for each email in emails parallel {
+      let analysis = classify email as EmailAnalysis
+      analyses.add(analysis)
+    }
+    for each a in analyses {
+      if a.priority == "urgent" {
+        respond "URGENT — {a.subject}: {a.summary}"
+      }
+    }
+    return analyses
+  }
+}

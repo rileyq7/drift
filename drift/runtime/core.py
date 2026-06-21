@@ -140,6 +140,87 @@ def confident_inner(schema):
     return getattr(schema, "_inner_type", None) if is_confident_schema(schema) else None
 
 
+def dataclass_to_json_schema(cls) -> dict | None:
+    """Render a Drift dataclass into a JSON Schema for provider strict mode.
+
+    Covers the subset Drift codegen emits: primitives, Literal[...] from
+    `one of`, list[...], dict[...], Optional[...], nested dataclasses.
+    Returns None if the type isn't a dataclass.
+    """
+    if not dataclasses.is_dataclass(cls):
+        return None
+    return {
+        "type": "object",
+        "properties": {f.name: _field_to_json_schema(f.type) for f in dataclasses.fields(cls)},
+        "required": [f.name for f in dataclasses.fields(cls)],
+        "additionalProperties": False,
+    }
+
+
+def _field_to_json_schema(type_expr) -> dict:
+    """Translate a dataclass field's type annotation to JSON Schema."""
+    # Bare Python class form: str / int / float / bool / dataclass
+    if isinstance(type_expr, type):
+        if type_expr is str:
+            return {"type": "string"}
+        if type_expr is int:
+            return {"type": "integer"}
+        if type_expr is float:
+            return {"type": "number"}
+        if type_expr is bool:
+            return {"type": "boolean"}
+        if dataclasses.is_dataclass(type_expr):
+            return dataclass_to_json_schema(type_expr)
+        # Unknown class — fall through to permissive object.
+        return {"type": "object"}
+
+    # typing form: string-ish representation (Literal[...], list[T], etc.)
+    s = str(type_expr).replace("typing.", "")
+
+    # Literal["a","b"]
+    if s.startswith("Literal["):
+        import re
+        vals = re.findall(r"['\"]([^'\"]+)['\"]", s)
+        return {"type": "string", "enum": vals} if vals else {"type": "string"}
+
+    # Optional[T] / Union[T, None]
+    if s.startswith("Optional["):
+        inner = s[len("Optional["):-1]
+        return {"anyOf": [_field_to_json_schema(inner), {"type": "null"}]}
+
+    # list[T]
+    if s.startswith("list[") or s.startswith("List["):
+        inner = s[s.index("[") + 1:-1]
+        return {"type": "array", "items": _field_to_json_schema(inner)}
+
+    # dict[K, V] — JSON keys are strings; ignore K.
+    if s.startswith("dict[") or s.startswith("Dict["):
+        inner = s[s.index("[") + 1:-1]
+        depth = 0
+        for i, ch in enumerate(inner):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                v_type = inner[i + 1:].strip()
+                return {"type": "object", "additionalProperties": _field_to_json_schema(v_type)}
+        return {"type": "object"}
+
+    # Primitives by name (strings, e.g. "str", "int")
+    if s in ("str", "string", "<class 'str'>"):
+        return {"type": "string"}
+    if s in ("int", "integer", "<class 'int'>"):
+        return {"type": "integer"}
+    if s in ("float", "number", "<class 'float'>"):
+        return {"type": "number"}
+    if s in ("bool", "<class 'bool'>"):
+        return {"type": "boolean"}
+
+    # Unknown — permissive object, runtime validation catches mismatches.
+    return {"type": "object"}
+
+
 # ─── Budget ────────────────────────────────────────────────────────────
 
 @dataclass
@@ -935,6 +1016,27 @@ class OpenAIProvider:
             )
         self.base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
 
+    def _strict_schema_for(self, output_schema) -> dict | None:
+        if output_schema is None:
+            return None
+        if is_confident_schema(output_schema):
+            inner = confident_inner(output_schema)
+            value_schema = dataclass_to_json_schema(inner) if inner is not None else {"type": "string"}
+            if value_schema is None:
+                value_schema = {"type": "string"}
+            return {
+                "type": "object",
+                "properties": {
+                    "value": value_schema,
+                    "confidence": {"type": "number"},
+                },
+                "required": ["value", "confidence"],
+                "additionalProperties": False,
+            }
+        if dataclasses.is_dataclass(output_schema):
+            return dataclass_to_json_schema(output_schema)
+        return None
+
     async def call(self, model: str, system: str, prompt: str,
                    output_schema=None) -> tuple[str, int, int]:
         import httpx
@@ -944,6 +1046,27 @@ class OpenAIProvider:
         if api_model.startswith('openai/'):
             api_model = api_model.split('/', 1)[1]
 
+        payload = {
+            "model": api_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        # Strict mode: when the call has a dataclass schema, attach JSON Schema
+        # so OpenAI forces the response to match. Drops the "model returned
+        # almost-JSON" failure mode entirely.
+        schema_for_strict = self._strict_schema_for(output_schema)
+        if schema_for_strict is not None and not os.environ.get('DRIFT_NO_STRICT'):
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "drift_intent_output",
+                    "schema": schema_for_strict,
+                    "strict": True,
+                },
+            }
+
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -952,13 +1075,7 @@ class OpenAIProvider:
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": api_model,
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": prompt},
-                        ],
-                    },
+                    json=payload,
                     timeout=60.0,
                 )
         except (httpx.TimeoutException, httpx.NetworkError) as e:
@@ -1069,6 +1186,11 @@ def step_decorator(output=None, modifier=""):
             # (`step is final_recommendation`) can fire.
             self._current_step = step_name
 
+            def _tag(exc):
+                setattr(exc, '_drift_agent', getattr(self, 'name', None))
+                setattr(exc, '_drift_step', step_name)
+                return exc
+
             last_error = None
             for attempt in range(max_retries):
                 try:
@@ -1083,22 +1205,20 @@ def step_decorator(output=None, modifier=""):
                     if attempt < max_retries - 1:
                         print(f"  ⟳  Schema violation in {step_name}, retrying ({attempt + 1}/{max_retries})")
                         continue
-                    raise StepFailed(
+                    raise _tag(StepFailed(
                         f"Step '{step_name}' failed after {max_retries} attempts: {e}"
-                    )
+                    ))
 
                 except ModelUnavailable as e:
                     last_error = e
-                    # Mark the specific model that failed, not whatever
-                    # select() would return next.
                     self.model.mark_unavailable(getattr(e, 'model', None))
                     if attempt < max_retries - 1 and self.model.candidates():
                         next_model = self.model.candidates()[0]
                         print(f"  ⟳  {getattr(e, 'model', '?')} unavailable, falling back to {next_model}")
                         continue
-                    raise StepFailed(
+                    raise _tag(StepFailed(
                         f"Step '{step_name}' failed: no models available ({e})"
-                    )
+                    ))
 
                 except RateLimited as e:
                     last_error = e
@@ -1107,18 +1227,16 @@ def step_decorator(output=None, modifier=""):
                         print(f"  ⟳  Rate limited on {e.model}, waiting {wait:.1f}s")
                         await asyncio.sleep(wait)
                         continue
-                    raise StepFailed(
+                    raise _tag(StepFailed(
                         f"Step '{step_name}' failed after {max_retries} rate-limited attempts"
-                    )
+                    ))
 
-                except (AuthError, BudgetExceeded):
-                    # Both are fail-fast: retrying won't make a bad key good
-                    # or refund spent budget.
-                    raise
+                except (AuthError, BudgetExceeded) as e:
+                    raise _tag(e)
 
-            raise StepFailed(
+            raise _tag(StepFailed(
                 f"Step '{step_name}' failed after {max_retries} attempts: {last_error}"
-            )
+            ))
 
         return wrapper
     return decorator
@@ -1280,12 +1398,12 @@ async def run_agent(agent_class: type, step_name: str = None,
         return result
 
     except BudgetExceeded as e:
-        print(f"\n  ✗ Budget exceeded: {e}")
+        # The CLI's _print_runtime_error renders a structured frame; just
+        # surface the cost summary first so the user sees what they spent.
         print(agent.cost_tracker.summary())
         raise
 
-    except StepFailed as e:
-        print(f"\n  ✗ Step failed: {e}")
+    except StepFailed:
         raise
 
     finally:

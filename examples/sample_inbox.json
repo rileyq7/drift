@@ -1,0 +1,9 @@
+{
+  "emails": [
+    "Subject: URGENT — Production down\n\nOur main API has been throwing 500s for 20 minutes. Need eyes on this NOW.",
+    "Subject: Invoice INV-4421 — payment overdue\n\nReminder that your invoice for $1,290 is 14 days overdue. Please remit payment to avoid service interruption.",
+    "Subject: Re: Demo request from Acme Corp\n\nThanks for the deck. Sarah at Acme would like a 30-min walkthrough next Tuesday or Wednesday afternoon. Can you confirm?",
+    "Subject: Weekly newsletter from devtools.com\n\nThis week: 7 launches we found interesting, plus our take on the state of agent frameworks.",
+    "Subject: Coffee Friday?\n\nHey! Long time no see. Want to grab coffee at Blue Bottle this Friday around 3? No agenda, just catching up."
+  ]
+}
