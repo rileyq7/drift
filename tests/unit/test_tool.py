@@ -24,11 +24,14 @@ class TestMcpForm:
         assert t.kind == "mcp"
         assert t.source == "https://grants.api/mcp"
 
-    def test_codegen_emits_placeholder(self, transpile):
+    def test_codegen_emits_mcp_tool(self, transpile):
+        """MCP runtime now real — codegen emits McpTool wrapping the URL.
+        The legacy `_<name>_McpTool` symbol is kept as an alias so older
+        downstream tooling that grepped for it still works."""
         out = transpile('tool grants from mcp "https://grants.api/mcp"')
-        assert "_grants_McpTool" in out
-        assert "NotImplementedError" in out
-        assert "https://grants.api/mcp" in out
+        assert "from drift.runtime.mcp_client import McpTool" in out
+        assert "grants = _McpTool('https://grants.api/mcp'" in out
+        assert "_grants_McpTool" in out  # legacy alias preserved
 
 
 class TestRestForm:

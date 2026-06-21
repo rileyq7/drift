@@ -1,0 +1,75 @@
+-- grant_checker_with_memory.drift
+--
+-- Demonstrates Drift + Dendric: memory that persists across agent runs
+-- and changes agent behavior on later runs.
+--
+-- Two-run demo:
+--   Run 1: evaluate(TechCo, healthcare grant) → scores, remembers
+--   Run 2: evaluate(MedAI, healthcare grant) → recalls TechCo + dejas
+--
+-- Real run with Dendric (set OPENAI_API_KEY + DATABASE_URL):
+--   python drift_cli.py run examples/grant_checker_with_memory.drift \
+--     --step evaluate \
+--     --input '{"company_profile": "TechCo, healthcare AI, 15 employees",
+--               "call_text": "Innovate UK Smart Grants, AI + health focus"}'
+--
+--   python drift_cli.py run examples/grant_checker_with_memory.drift \
+--     --step evaluate \
+--     --input '{"company_profile": "MedAI Ltd, drug discovery ML, 8 employees",
+--               "call_text": "Innovate UK Smart Grants, AI + health focus"}'
+
+config {
+  name: "Grant Eligibility Checker (with memory)"
+  version: "1.0.0"
+}
+
+schema FitScore {
+  company_name: string
+  overall_score: number between 0 and 100
+  recommendation: one of "strong fit", "possible fit", "weak fit", "no fit"
+  reasoning: string
+  confidence: number between 0 and 1
+}
+
+agent GrantChecker {
+  model: prefer "claude-haiku" fallback "claude-sonnet"
+  memory: dendric("grant_history")
+  budget: £5 per run
+
+  step evaluate(company_profile: string, call_text: string) -> FitScore {
+    -- Pull prior evaluations for similar companies/grants
+    let past = recall similar evaluations for company_profile
+
+    -- Score the company. (The model gets prior evaluations through the
+    -- recall above — the runtime passes them as additional context.)
+    let score = rate company_profile against call_text as FitScore
+
+    -- If the spreading-activation archive trigger fires on this profile,
+    -- surface the dormant memory before the agent commits to a number.
+    deja_vu match on company_profile {
+      "similar_rejection" -> {
+        respond "Warning: a similar profile was rejected previously"
+      }
+      "successful_pattern" -> {
+        respond "Pattern matches a previous successful application"
+      }
+      any other -> {
+        respond "Novel profile — no archive resonance"
+      }
+    }
+
+    -- Persist the verdict. Tags become part of the context Dendric
+    -- entity-extracts on, so future recalls on "healthcare" / "innovate_uk"
+    -- can find this one.
+    remember score tagged "healthcare innovate_uk"
+
+    return score
+  }
+
+  step cleanup() -> string {
+    -- Periodic housekeeping: drop ice-cold memories so the archive
+    -- stays focused on patterns that still resonate.
+    forget memories where temp < 0.05
+    return "cleaned"
+  }
+}

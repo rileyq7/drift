@@ -18,6 +18,7 @@ from .core import (
     Budget,
     CostTracker,
     ModelRouter,
+    StreamThenRouter,
     Intent,
     Checkpoint,
     Confident,
@@ -33,6 +34,7 @@ from .core import (
     RateLimited,
     AuthError,
 )
+from .dendric_store import make_memory_store, DendricStore, DejaVuMatch
 
 __all__ = [
     'Agent',
@@ -40,10 +42,14 @@ __all__ = [
     'Budget',
     'CostTracker',
     'ModelRouter',
+    'StreamThenRouter',
     'Intent',
     'Checkpoint',
     'Confident',
     'MemoryStore',
+    'make_memory_store',
+    'DendricStore',
+    'DejaVuMatch',
     'run_agent',
     'register_custom_verb',
     'CUSTOM_VERBS',

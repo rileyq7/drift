@@ -243,6 +243,11 @@ class Parser:
         unit_map = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
         return float(lit[:-1]) * unit_map.get(lit[-1], 1.0)
 
+    def _duration_to_days(self, lit: str) -> int:
+        """Used by `forget memories older than 90d`. Rounds down so
+        `1h` is 0 days, `36h` is 1 day."""
+        return int(self._duration_to_seconds(lit) / 86400.0)
+
     def _parse_pipeline_edge(self, pipe: 'ast.PipelineDecl'):
         from_node = self._parse_node_ref()
         while self.peek().type in self.PIPELINE_OPS:
@@ -555,13 +560,25 @@ class Parser:
         if t.type == TT.IDENT and t.value == 'prefer':
             self.eat()
             config.prefer = self.eat(TT.STRING).value
+            config.mode = "prefer"
             if self.check_ident('fallback'):
                 self.eat()
                 config.fallback = self.eat(TT.STRING).value
                 config.fallback_list = [config.fallback]
             config.default = config.prefer
             return config
-        raise ParseError("Expected model string, 'prefer', or '{'", t)
+        if t.type == TT.IDENT and t.value == 'stream':
+            # `model: stream "fast" then "slow"`
+            self.eat()
+            config.stream_model = self.eat(TT.STRING).value
+            self.eat_ident('then')
+            config.then_model = self.eat(TT.STRING).value
+            config.mode = "stream_then"
+            # `default` keeps the slow model so other code paths that
+            # only look at .default still get the reasoning model.
+            config.default = config.then_model
+            return config
+        raise ParseError("Expected model string, 'prefer', 'stream', or '{'", t)
 
     def _parse_model_block_entry(self, config: 'ast.ModelConfig'):
         t = self.peek()
@@ -670,9 +687,30 @@ class Parser:
         return ast.QualityConfig(min_confidence=value)
 
     def parse_memory_config(self):
-        """memory { store: ..., recall strategy: ..., max recall: N items, decay: enabled }"""
+        """Two forms:
+          memory: dendric("persona")            — shorthand, Dendric backend
+          memory { store: ..., recall strategy: ..., max recall: N items, decay: enabled }
+                                                — legacy block, sqlite backend
+        """
         self.eat_ident('memory')
         self.skip_newlines()
+
+        # Shorthand: `memory: dendric("persona")`
+        if self.check(TT.COLON):
+            self.eat(TT.COLON)
+            self.skip_newlines()
+            backend_name = self.eat(TT.IDENT).value
+            if backend_name != 'dendric':
+                raise ParseError(
+                    f"Unknown memory backend {backend_name!r} (expected 'dendric')",
+                    self.peek(),
+                )
+            self.eat(TT.LPAREN)
+            persona = self.eat(TT.STRING).value
+            self.eat(TT.RPAREN)
+            return ast.MemoryConfig(backend="dendric", persona=persona)
+
+        # Block form: `memory { ... }`
         self.eat(TT.LBRACE)
         self.skip_newlines()
 
@@ -828,6 +866,10 @@ class Parser:
                 return self.parse_fail()
             elif t.value == 'remember':
                 return self.parse_remember()
+            elif t.value == 'deja_vu':
+                return self.parse_deja_vu()
+            elif t.value == 'forget':
+                return self.parse_forget()
             elif t.value == 'recall':
                 # `recall` as a bare statement (no `let` binding) — accept it
                 # though the return value is discarded.
@@ -937,6 +979,102 @@ class Parser:
             self.eat()
             tag = self.parse_postfix()
         return ast.RememberStmt(value=value, tag=tag)
+
+    def parse_deja_vu(self):
+        """deja_vu match on <expr> {
+              "pattern_name" -> { body }
+              any other      -> { body }
+           }
+
+        Mirrors parse_match but binds against memory.deja_vu_check() and
+        dispatches via DejaVuMatch.matches(pattern) substring containment."""
+        self.eat_ident('deja_vu')
+        self.eat_ident('match')
+        self.eat_ident('on')
+        context_expr = self.parse_expression()
+        self.skip_newlines()
+        self.eat(TT.LBRACE)
+        self.skip_newlines()
+
+        arms = []
+        while not self.check(TT.RBRACE):
+            arm = ast.DejaVuArm()
+            if self.check_ident('any'):
+                self.eat()
+                if self.check_ident('other'):
+                    self.eat()
+                arm.is_default = True
+                arm.pattern = ""
+            else:
+                # Pattern must be a string literal for v1 classification.
+                if self.peek().type != TT.STRING:
+                    raise ParseError(
+                        "deja_vu arm pattern must be a string literal",
+                        self.peek(),
+                    )
+                arm.pattern = self.eat(TT.STRING).value
+
+            self.eat(TT.ARROW)
+            if self.check(TT.LBRACE):
+                self.eat(TT.LBRACE)
+                self.skip_newlines()
+                while not self.check(TT.RBRACE):
+                    arm.body.append(self.parse_statement())
+                    self.skip_newlines()
+                self.eat(TT.RBRACE)
+            else:
+                arm.body.append(self.parse_statement())
+
+            arms.append(arm)
+            self.skip_newlines()
+
+        self.eat(TT.RBRACE)
+        return ast.DejaVuStmt(context_expr=context_expr, arms=arms)
+
+    def parse_forget(self):
+        """forget memories tagged "x"
+           forget memories older than 90d
+           forget memories where temp < 0.3
+
+        All three forms route to memory.forget(...) — the adapter handles
+        query-then-delete for tag/age, native forget(below_temp=...) for temp."""
+        self.eat_ident('forget')
+        self.eat_ident('memories')
+
+        # `forget memories tagged "x"`
+        if self.check_ident('tagged'):
+            self.eat()
+            tag = self.parse_postfix()
+            return ast.ForgetStmt(mode="by_tag", tag=tag)
+
+        # `forget memories older than <duration>`
+        if self.check_ident('older'):
+            self.eat()
+            self.eat_ident('than')
+            tok = self.eat(TT.DURATION)
+            days = self._duration_to_days(tok.value)
+            return ast.ForgetStmt(mode="by_age", older_than_days=days)
+
+        # `forget memories where temp < 0.3`
+        if self.check_ident('where'):
+            self.eat()
+            self.eat_ident('temp')
+            # Accept `<` or `<=` — both clip the cold tail.
+            tok = self.peek()
+            if tok.type == TT.LANGLE or tok.type == TT.LTE:
+                self.eat()
+            else:
+                raise ParseError(
+                    "Expected '<' or '<=' after 'temp' in forget clause",
+                    tok,
+                )
+            threshold = float(self.eat(TT.NUMBER).value)
+            return ast.ForgetStmt(mode="by_temp", below_temp=threshold)
+
+        raise ParseError(
+            "Expected 'tagged', 'older than', or 'where temp' after 'forget memories'",
+            self.peek(),
+        )
 
     def parse_let(self):
         self.eat_ident('let')

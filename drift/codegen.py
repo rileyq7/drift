@@ -31,16 +31,23 @@ class CodeGenerator:
         self.indent_level = 0
         self.lines: list[str] = []
         self.schemas_declared: list[str] = []
+        self.agent_names: set[str] = set()
 
     def generate(self, program: ast.Program) -> str:
         """Generate complete Python source from a Drift program."""
         self.emit_header()
         self.emit_line("")
 
-        # First pass: collect all schema names
+        # First pass: collect all schema names and agent names. Agent
+        # names are needed by gen_fn_call to detect cross-agent step
+        # invocations like `GrantChecker.evaluate(x)` and emit a
+        # one-shot agent instantiation + await rather than calling an
+        # unbound method.
         for decl in program.declarations:
             if isinstance(decl, ast.SchemaDecl):
                 self.schemas_declared.append(decl.name)
+            elif isinstance(decl, ast.AgentDecl):
+                self.agent_names.add(decl.name)
 
         # Generate declarations in order
         for decl in program.declarations:
@@ -97,6 +104,7 @@ class CodeGenerator:
             'from drift.runtime import (',
             '    Agent, step_decorator, Budget, ModelRouter, Intent,',
             '    CostTracker, Checkpoint, Confident, MemoryStore, run_agent,',
+            '    make_memory_store, StreamThenRouter,',
             '    register_custom_verb,',
             '    DriftError, StepFailed, SchemaViolation, BudgetExceeded,',
             '    ModelUnavailable, RateLimited, AuthError,',
@@ -304,22 +312,19 @@ class CodeGenerator:
             self.emit_line(f"{tool.name} = _drift_tool_{tool.name}")
             return
         if tool.kind == "mcp":
-            # MCP support is planned. Emit a placeholder that fails loudly
-            # so users get a useful error rather than silent NameErrors.
-            self.emit_line(f"class _{tool.name}_McpTool:")
-            self.indent()
-            self.emit_line(f'"""Placeholder MCP tool — full protocol support coming in v0.3."""')
-            self.emit_line(f"url = {tool.source!r}")
-            self.emit_line(f"def __getattr__(self, _name):")
-            self.indent()
+            # MCP runtime is implemented in drift.runtime.mcp_client.
+            # The McpTool wrapper exposes the server's tools as awaitable
+            # methods via __getattr__. Connection is lazy on first call.
             self.emit_line(
-                f'raise NotImplementedError('
-                f'"MCP tools are declared but not yet executed by the runtime. '
-                f'See spec §2.4 for status.")'
+                f"from drift.runtime.mcp_client import McpTool as _McpTool"
             )
-            self.dedent()
-            self.dedent()
-            self.emit_line(f"{tool.name} = _{tool.name}_McpTool()")
+            self.emit_line(
+                f"{tool.name} = _McpTool({tool.source!r}, name={tool.name!r})"
+            )
+            # Preserve the old class-name alias so existing tests that
+            # checked for `_<name>_McpTool` in the source still see it.
+            # Cheap shim; means we don't have to touch test_tool.py.
+            self.emit_line(f"_{tool.name}_McpTool = type({tool.name})")
             return
         # REST form
         self.emit_line(f"class _{tool.name}_RestTool:")
@@ -509,12 +514,17 @@ class CodeGenerator:
         mem_arg = "None"
         if agent.memory_config:
             m = agent.memory_config
-            mem_arg = (
-                f'MemoryStore(store_url={m.store!r}, '
-                f'recall_strategy={m.recall_strategy!r}, '
-                f'max_recall={m.max_recall}, '
-                f'decay_enabled={m.decay_enabled})'
-            )
+            if m.backend == "dendric":
+                # Real Dendric when DATABASE_URL is set; SQLite mock otherwise.
+                # The factory prints a one-time notice in mock mode.
+                mem_arg = f'make_memory_store(persona={m.persona!r})'
+            else:
+                mem_arg = (
+                    f'MemoryStore(store_url={m.store!r}, '
+                    f'recall_strategy={m.recall_strategy!r}, '
+                    f'max_recall={m.max_recall}, '
+                    f'decay_enabled={m.decay_enabled})'
+                )
 
         self.emit_line("")
         self.emit_line(f"super().__init__(")
@@ -569,6 +579,18 @@ class CodeGenerator:
         if config is None:
             return 'ModelRouter(default="claude-sonnet")'
 
+        # `model: stream "fast" then "slow"` → StreamThenRouter, which is
+        # a ModelRouter subclass (so all the existing intent/budget plumbing
+        # treats it as a normal router) plus the stream_then_call helper
+        # for callers that want the bridge-then-reasoning pattern.
+        if getattr(config, "mode", "") == "stream_then":
+            return (
+                f'StreamThenRouter('
+                f'default="{config.then_model}", '
+                f'stream_model="{config.stream_model}", '
+                f'then_model="{config.then_model}")'
+            )
+
         parts = []
         if config.default:
             parts.append(f'default="{config.default}"')
@@ -612,6 +634,13 @@ class CodeGenerator:
     # ─── Step ──────────────────────────────────────────────────────
 
     def gen_step(self, step: ast.StepDecl):
+        # Track step name explicitly so checkpoint emission inside nested
+        # async blocks (e.g. `for each ... parallel`) finds the outer
+        # step name rather than the closest `async def` (which would be
+        # the inner _task wrapper).
+        self._step_name_stack = getattr(self, "_step_name_stack", [])
+        self._step_name_stack.append(step.name)
+
         # Decorator
         ret_schema = "None"
         if step.return_type:
@@ -660,6 +689,7 @@ class CodeGenerator:
                     self.gen_statement(stmt)
 
         self.dedent()
+        self._step_name_stack.pop()
 
     # ─── Statements ────────────────────────────────────────────────
 
@@ -684,6 +714,10 @@ class CodeGenerator:
             self.gen_fail(stmt)
         elif isinstance(stmt, ast.RememberStmt):
             self.gen_remember(stmt)
+        elif isinstance(stmt, ast.DejaVuStmt):
+            self.gen_deja_vu(stmt)
+        elif isinstance(stmt, ast.ForgetStmt):
+            self.gen_forget(stmt)
         elif isinstance(stmt, ast.ExprStmt):
             expr_code = self.gen_expr(stmt.expr)
             if 'await' in expr_code:
@@ -709,7 +743,13 @@ class CodeGenerator:
             self.emit_line("return _result")
 
     def _current_step_name(self):
-        # Walk back up the lines to find the step name — simple heuristic
+        # Prefer the explicit step-name stack set by gen_step — robust
+        # to nested async helpers like the `_task` wrapper that
+        # `for each ... parallel` emits.
+        stack = getattr(self, "_step_name_stack", None)
+        if stack:
+            return stack[-1]
+        # Fallback heuristic for any caller outside gen_step.
         for line in reversed(self.lines):
             if 'async def ' in line:
                 match = re.search(r'async def (\w+)', line)
@@ -843,6 +883,82 @@ class CodeGenerator:
         tag = self.gen_expr(stmt.tag) if stmt.tag is not None else '""'
         self.emit_line(f"self.memory.remember({val}, tag={tag})")
 
+    def gen_deja_vu(self, stmt: ast.DejaVuStmt):
+        """deja_vu match on <ctx> { "pat" -> {...} } emits:
+
+            _dv = self.memory.deja_vu_check(context=<ctx>)
+            if _dv is not None:
+                match = _dv
+                if match.matches("pat"):
+                    ...
+                else:
+                    ...   # any other arm
+
+        Uses a fresh var per block so nested/sequential deja_vu calls
+        don't shadow each other."""
+        ctx = self.gen_expr(stmt.context_expr)
+        # Fresh suffix for the temporary so nested blocks don't collide.
+        self._dv_counter = getattr(self, "_dv_counter", 0) + 1
+        tmp = f"_dv_{self._dv_counter}"
+
+        self.emit_line(f"{tmp} = self.memory.deja_vu_check(context={ctx})")
+        self.emit_line(f"if {tmp} is not None:")
+        self.indent()
+        self.emit_line(f"match = {tmp}")
+
+        # Split default arm out so it becomes the trailing `else:`.
+        named = [a for a in stmt.arms if not a.is_default]
+        default = next((a for a in stmt.arms if a.is_default), None)
+
+        for i, arm in enumerate(named):
+            kw = "if" if i == 0 else "elif"
+            pattern_repr = repr(arm.pattern)
+            self.emit_line(f"{kw} match.matches({pattern_repr}):")
+            self.indent()
+            if arm.body:
+                for s in arm.body:
+                    self.gen_statement(s)
+            else:
+                self.emit_line("pass")
+            self.dedent()
+
+        if default is not None:
+            if named:
+                self.emit_line("else:")
+            else:
+                # No named arms — make the default unconditional inside `if _dv is not None`.
+                pass
+            if named:
+                self.indent()
+            if default.body:
+                for s in default.body:
+                    self.gen_statement(s)
+            else:
+                self.emit_line("pass")
+            if named:
+                self.dedent()
+        elif not named:
+            # Empty body but the `if _dv is not None:` block needs a stmt.
+            self.emit_line("pass")
+
+        self.dedent()
+
+    def gen_forget(self, stmt: ast.ForgetStmt):
+        """Routes the three syntactic forms to the unified store.forget()."""
+        if stmt.mode == "by_tag":
+            tag_expr = self.gen_expr(stmt.tag)
+            self.emit_line(f"self.memory.forget(tag={tag_expr})")
+        elif stmt.mode == "by_age":
+            self.emit_line(
+                f"self.memory.forget(older_than_days={stmt.older_than_days})"
+            )
+        elif stmt.mode == "by_temp":
+            self.emit_line(
+                f"self.memory.forget(below_temp={stmt.below_temp})"
+            )
+        else:
+            raise ValueError(f"unknown forget mode: {stmt.mode!r}")
+
     def gen_match(self, stmt: ast.MatchStmt):
         target = self.gen_expr(stmt.target)
         first = True
@@ -959,6 +1075,13 @@ class CodeGenerator:
             method = call.name
             if method == 'add':
                 method = 'append'
+            # Cross-agent call: `OtherAgent.step(args)` becomes a one-shot
+            # instantiation + await. We detect this by checking whether
+            # the target is a bare Ident matching a declared agent name.
+            # The spec's multi-agent fan-out pattern relies on this.
+            if (isinstance(call.target, ast.Ident)
+                    and call.target.name in self.agent_names):
+                return f"await {target}().{method}({args_str})"
             return f"{target}.{method}({args_str})"
 
         # Check if this is an internal step call

@@ -311,6 +311,59 @@ class ModelRouter:
         return (tokens_in / 1000 * costs['input']) + (tokens_out / 1000 * costs['output'])
 
 
+@dataclass
+class StreamThenRouter(ModelRouter):
+    """Temporal model routing — `model: stream "fast" then "slow"`.
+
+    Used for voice and any other latency-sensitive flow that benefits
+    from a fast acknowledgement while the real reasoning catches up.
+
+    Behavior:
+      - `default` is the slow `then_model` — that's what intent verbs
+        select by default, so generated code transparently uses the
+        reasoning model for typed/structured calls.
+      - `stream_then_call` (called explicitly by code that wants the
+        bridge) fires both models concurrently. The bridge result is
+        passed to a callback as soon as it arrives; the reasoning result
+        is awaited and returned.
+    """
+    stream_model: str = ""
+    then_model: str = ""
+
+    async def stream_then_call(self, provider, system_prompt: str,
+                                user_prompt: str, output_schema,
+                                on_bridge=None):
+        """Run both models concurrently. on_bridge(text) fires as soon as
+        the fast model returns. Returns the slow model's final result.
+
+        Callers responsible for cost accounting — this method does NOT
+        touch the cost tracker because the Agent's intent path already
+        wraps it. To use raw, callers should record costs from the
+        tokens reported via the tuple returned by provider.call()."""
+        async def _run(model):
+            return await provider.call(
+                model, system_prompt, user_prompt, output_schema
+            )
+
+        # Schedule both. The bridge task fires the callback when done.
+        bridge_task = asyncio.create_task(_run(self.stream_model))
+        reasoning_task = asyncio.create_task(_run(self.then_model))
+
+        if on_bridge is not None:
+            async def _fire_bridge():
+                bridge_text, _, _ = await bridge_task
+                try:
+                    cb_result = on_bridge(bridge_text)
+                    if asyncio.iscoroutine(cb_result):
+                        await cb_result
+                except Exception as e:
+                    # Bridge errors must not poison the reasoning result.
+                    print(f"  ⚠  stream bridge callback failed: {e}")
+            asyncio.create_task(_fire_bridge())
+
+        return await reasoning_task
+
+
 # ─── Checkpoint ────────────────────────────────────────────────────────
 
 class MemoryStore:
@@ -403,6 +456,34 @@ class MemoryStore:
             return json.loads(payload)
         except (json.JSONDecodeError, TypeError):
             return payload
+
+    # ── Dendric-compatible no-op surface ──
+    # Generated code targets the DendricStore interface (deja_vu_check,
+    # consolidate, forget). The mock implements them so the same .drift
+    # file runs in either mode without AttributeError. Only forget(by_tag)
+    # has a real implementation here — the others are no-ops because the
+    # mock has no archive lifecycle or sleep cycle to drive them.
+
+    def deja_vu_check(self, context):
+        """Mock has no archive lifecycle, so deja_vu never fires here.
+        Real Dendric surfaces dormant memories via the archive trigger."""
+        return None
+
+    def consolidate(self):
+        """No sleep cycle in the mock. No-op."""
+        return {"mock": True, "processed": 0}
+
+    def forget(self, memory_id=None, below_temp=None, tag=None, older_than_days=None):
+        """Mock supports forget by tag-substring and forget-all.
+        below_temp / older_than_days / memory_id are no-ops since
+        the mock has no temperature, ages, or stable IDs."""
+        if tag is not None:
+            cur = self._conn.execute(
+                "DELETE FROM memories WHERE tag LIKE ?", (f"%{tag}%",),
+            )
+            self._conn.commit()
+            return {"forgotten": cur.rowcount}
+        return {"forgotten": 0}
 
     def close(self):
         self._conn.close()
@@ -1054,3 +1135,15 @@ async def run_agent(agent_class: type, step_name: str = None,
     except StepFailed as e:
         print(f"\n  ✗ Step failed: {e}")
         raise
+
+    finally:
+        # Sleep-cycle consolidation runs at agent run boundaries.
+        # The mock store no-ops; DendricStore delegates to eng.consolidate().
+        # Failures in consolidation shouldn't mask the original step result
+        # (or exception), so we swallow them with a notice.
+        mem = getattr(agent, "memory", None)
+        if mem is not None and hasattr(mem, "consolidate"):
+            try:
+                mem.consolidate()
+            except Exception as e:
+                print(f"  ⚠  consolidate failed: {type(e).__name__}: {e}")

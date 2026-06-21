@@ -1,0 +1,1274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drift + Dendric — Agentic Primitive Suite</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@300;400;500;600;700&family=Newsreader:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0c0e12;
+  --bg-raised: #13161c;
+  --bg-hover: #1a1e27;
+  --bg-code: #0a0c0f;
+  --border: #1e2330;
+  --border-accent: #2a3040;
+  --text: #c8cdd8;
+  --text-muted: #6b7280;
+  --text-bright: #e8ecf4;
+  --accent: #6e8cef;
+  --accent-dim: #4a6ad4;
+  --accent-glow: rgba(110, 140, 239, 0.08);
+  --green: #4ade80;
+  --green-dim: rgba(74, 222, 128, 0.12);
+  --amber: #f59e0b;
+  --amber-dim: rgba(245, 158, 11, 0.12);
+  --red: #ef4444;
+  --red-dim: rgba(239, 68, 68, 0.1);
+  --purple: #a78bfa;
+  --purple-dim: rgba(167, 139, 250, 0.1);
+  --cyan: #22d3ee;
+  --cyan-dim: rgba(34, 211, 238, 0.08);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ── Header ── */
+header {
+  padding: 80px 0 60px;
+  border-bottom: 1px solid var(--border);
+}
+
+header .eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 20px;
+}
+
+header h1 {
+  font-family: 'Newsreader', serif;
+  font-size: 48px;
+  font-weight: 600;
+  color: var(--text-bright);
+  line-height: 1.15;
+  margin-bottom: 16px;
+}
+
+header h1 span { color: var(--accent); }
+
+header .subtitle {
+  font-size: 18px;
+  color: var(--text-muted);
+  font-weight: 300;
+  max-width: 600px;
+  line-height: 1.6;
+}
+
+header .meta {
+  margin-top: 32px;
+  display: flex;
+  gap: 32px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+header .meta strong { color: var(--text); font-weight: 500; }
+
+/* ── Sections ── */
+section {
+  padding: 48px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+section:last-of-type { border-bottom: none; }
+
+.section-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: var(--accent-dim);
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+h2 {
+  font-family: 'Newsreader', serif;
+  font-size: 30px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 20px;
+  line-height: 1.25;
+}
+
+h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin: 32px 0 12px;
+}
+
+h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 24px 0 8px;
+}
+
+p { margin-bottom: 16px; }
+
+p + p { margin-top: 0; }
+
+/* ── Code ── */
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 20px 24px;
+  overflow-x: auto;
+  margin: 16px 0 24px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.88em;
+  background: var(--bg-raised);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* Syntax colors inside pre */
+.kw { color: var(--accent); }
+.ty { color: var(--green); }
+.str { color: var(--amber); }
+.cm { color: var(--text-muted); font-style: italic; }
+.fn { color: var(--cyan); }
+.num { color: var(--purple); }
+.op { color: var(--text-muted); }
+
+/* ── Tables ── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0 24px;
+  font-size: 14px;
+}
+
+th {
+  text-align: left;
+  padding: 10px 16px;
+  border-bottom: 2px solid var(--border-accent);
+  font-weight: 600;
+  color: var(--text-bright);
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+tr:hover td { background: var(--accent-glow); }
+
+/* ── Feature Cards ── */
+.card-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 20px 0;
+}
+
+@media (max-width: 640px) { .card-grid { grid-template-columns: 1fr; } }
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+}
+
+.card.full { grid-column: 1 / -1; }
+
+.card-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.card-label.green { color: var(--green); }
+.card-label.amber { color: var(--amber); }
+.card-label.purple { color: var(--purple); }
+.card-label.cyan { color: var(--cyan); }
+.card-label.accent { color: var(--accent); }
+.card-label.red { color: var(--red); }
+
+.card h4 { margin: 0 0 8px; font-size: 16px; }
+.card p { margin: 0; font-size: 14px; color: var(--text-muted); }
+.card p:last-child { margin-bottom: 0; }
+
+/* ── Collapsible ── */
+details {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+}
+
+details[open] { background: var(--bg-raised); }
+
+summary {
+  padding: 14px 20px;
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--text-bright);
+  font-size: 15px;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  user-select: none;
+}
+
+summary::before {
+  content: '▸';
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--accent-dim);
+  transition: transform 0.15s;
+}
+
+details[open] summary::before { transform: rotate(90deg); }
+
+summary::-webkit-details-marker { display: none; }
+
+details .content { padding: 0 20px 20px; }
+
+/* ── Architecture Diagram ── */
+.arch-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 20px 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+}
+
+.arch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.arch-box {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 16px;
+  text-align: center;
+  flex: 1;
+}
+
+.arch-box.accent { border-color: var(--accent-dim); color: var(--accent); }
+.arch-box.green { border-color: rgba(74,222,128,0.3); color: var(--green); }
+.arch-box.amber { border-color: rgba(245,158,11,0.3); color: var(--amber); }
+.arch-box.purple { border-color: rgba(167,139,250,0.3); color: var(--purple); }
+.arch-box.cyan { border-color: rgba(34,211,238,0.3); color: var(--cyan); }
+
+.arch-arrow {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 2px 0;
+}
+
+/* ── Callout ── */
+.callout {
+  border-left: 3px solid var(--accent);
+  padding: 16px 20px;
+  margin: 20px 0;
+  background: var(--accent-glow);
+  border-radius: 0 6px 6px 0;
+  font-size: 14px;
+}
+
+.callout.green { border-color: var(--green); background: var(--green-dim); }
+.callout.amber { border-color: var(--amber); background: var(--amber-dim); }
+.callout.red { border-color: var(--red); background: var(--red-dim); }
+
+.callout strong { color: var(--text-bright); }
+
+/* ── Tree ── */
+.tree {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.8;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 20px 24px;
+  margin: 16px 0;
+}
+
+.tree .dir { color: var(--accent); }
+.tree .file { color: var(--text); }
+.tree .desc { color: var(--text-muted); }
+
+/* ── Lists inside content ── */
+.content ul, section > ul {
+  margin: 12px 0 16px 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.content ul li, section > ul li {
+  position: relative;
+  padding-left: 20px;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.content ul li::before, section > ul li::before {
+  content: '›';
+  position: absolute;
+  left: 4px;
+  color: var(--accent-dim);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ── Footer ── */
+footer {
+  padding: 40px 0 80px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- ═══════════════════════ HEADER ═══════════════════════ -->
+<header>
+  <div class="eyebrow">Technical Specification</div>
+  <h1>Drift + <span>Dendric</span></h1>
+  <p class="subtitle">
+    A complete agentic primitive suite — intent-based language, biologically-inspired memory, 
+    and adaptive voice architecture. Designed together from first principles.
+  </p>
+  <div class="meta">
+    <span><strong>Version</strong> 0.1.0</span>
+    <span><strong>Author</strong> Riley</span>
+    <span><strong>Date</strong> June 2026</span>
+    <span><strong>Status</strong> Working Draft</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════ 1. VISION ═══════════════════════ -->
+<section>
+  <div class="section-num">01 — Vision</div>
+  <h2>The Thesis</h2>
+  
+  <p>We are in the PHP/CGI era of agentic programming. Every team building AI agents is hand-rolling the same infrastructure: prompt construction, model selection, output parsing, retry logic, cost tracking, memory management. The abstractions haven't crystallised yet. Drift + Dendric is a bet on what those abstractions should be.</p>
+  
+  <p>The core insight: agent programs are fundamentally different from traditional programs. They are non-deterministic, they have cost, they fail gracefully, they remember, they learn, they compose. A truly agent-native system makes all of these <em>structural</em> rather than opt-in.</p>
+
+  <div class="callout">
+    <strong>Drift</strong> is how an agent thinks — an intent-based programming language that transpiles to Python.<br>
+    <strong>Dendric</strong> is how an agent remembers — a biologically-inspired memory engine with four retrieval paths, temporal decay, and spreading activation.<br>
+    Together they form a <strong>cognitive architecture</strong> for agents, expressed as a programming language.
+  </div>
+
+  <h3>Design Principles</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-label accent">Intent over instruction</div>
+      <h4>Say what, not how</h4>
+      <p><code>classify doc as FitScore</code> transpiles to ~40 lines of Python with prompting, validation, retries, and cost tracking. The programmer declares intent. The toolchain handles execution.</p>
+    </div>
+    <div class="card">
+      <div class="card-label green">Cost as first-class citizen</div>
+      <h4>Budget in the grammar</h4>
+      <p>Every agent has a cost cap enforced at the language level. Not an afterthought. Not a library you remember to import. Structural, like type safety.</p>
+    </div>
+    <div class="card">
+      <div class="card-label amber">Transparent compilation</div>
+      <h4>Readable output</h4>
+      <p>Generated Python is clean, documented, and debuggable. No black box. The same .drift input always produces the same .py output. The transpiler is deterministic — no AI in translation.</p>
+    </div>
+    <div class="card">
+      <div class="card-label purple">Progressive disclosure</div>
+      <h4>Readable by everyone</h4>
+      <p>Non-engineers read .drift files and understand the agent logic. Engineers drop into the generated Python for full control. Domain experts can modify agent behaviour without touching code.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 2. DRIFT LANGUAGE ═══════════════════════ -->
+<section>
+  <div class="section-num">02 — Drift Language</div>
+  <h2>Language Overview</h2>
+
+  <p>Drift is an intent-based programming language for agentic AI systems. Programs describe <em>what</em> an agent should accomplish rather than <em>how</em> to accomplish it. The Drift transpiler converts <code>.drift</code> files into production-grade Python 3.11+ code that calls the Drift runtime.</p>
+
+  <h3>Core Primitives</h3>
+  <table>
+    <thead>
+      <tr><th>Primitive</th><th>Purpose</th><th>Example</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>agent</code></td><td>Top-level autonomous unit with model, budget, and memory config</td><td><code>agent GrantChecker { ... }</code></td></tr>
+      <tr><td><code>step</code></td><td>A discrete unit of work within an agent</td><td><code>step evaluate(doc: document) -> FitScore</code></td></tr>
+      <tr><td><code>schema</code></td><td>Typed data shape with constraints and validation</td><td><code>schema FitScore { score: number between 0 and 100 }</code></td></tr>
+      <tr><td><code>intent verbs</code></td><td>Declarative LLM operations</td><td><code>classify</code>, <code>extract</code>, <code>summarize</code>, <code>rate</code>, <code>generate</code>, <code>rewrite</code>, <code>answer</code>, <code>compare</code>, <code>decide</code></td></tr>
+      <tr><td><code>budget</code></td><td>Cost ceiling enforced at runtime</td><td><code>budget: £5 per run</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>Intent Expression Anatomy</h3>
+  <p>Intent expressions are the core Drift primitive — they replace 30-50 lines of Python with a single declarative statement:</p>
+
+<pre><span class="cm">-- Each of these is a complete LLM operation with prompting,</span>
+<span class="cm">-- parsing, validation, retries, and cost tracking</span>
+
+<span class="kw">classify</span> doc <span class="kw">as</span> <span class="ty">FitScore</span>
+<span class="kw">extract</span> name, date, amount <span class="kw">from</span> invoice <span class="kw">as</span> <span class="ty">InvoiceData</span>
+<span class="kw">summarize</span> report <span class="kw">in</span> <span class="num">3</span> sentences
+<span class="kw">rate</span> company <span class="kw">against</span> criteria <span class="kw">as</span> <span class="ty">FitScore</span>
+<span class="kw">generate</span> a welcome message for new users <span class="kw">as</span> <span class="ty">string</span>
+<span class="kw">rewrite</span> paragraph <span class="kw">to</span> formal_tone
+<span class="kw">answer</span> question <span class="kw">using</span> context <span class="kw">as</span> <span class="ty">string</span>
+<span class="kw">compare</span> proposal_a <span class="kw">against</span> proposal_b <span class="kw">as</span> <span class="ty">Comparison</span></pre>
+
+  <h3>Model Routing</h3>
+  <p>The model router selects the optimal model per-call based on cost, availability, and task complexity. Budget-aware degradation means the agent automatically shifts to cheaper models as the budget cap approaches.</p>
+
+<pre><span class="kw">agent</span> <span class="ty">SmartRouter</span> {
+  <span class="cm">-- Primary model with fallback chain</span>
+  <span class="kw">model</span>: <span class="kw">prefer</span> <span class="str">"claude-sonnet"</span> <span class="kw">fallback</span> <span class="str">"claude-haiku"</span>
+  <span class="kw">budget</span>: <span class="num">£5</span> <span class="kw">per</span> run
+}</pre>
+
+  <details>
+    <summary>Complete Example — Grant Eligibility Checker</summary>
+    <div class="content">
+<pre><span class="kw">schema</span> <span class="ty">FitScore</span> {
+  company_name: <span class="ty">string</span>
+  overall_score: <span class="ty">number</span> <span class="kw">between</span> <span class="num">0</span> <span class="kw">and</span> <span class="num">100</span>
+  matching_criteria: <span class="ty">list</span>&lt;<span class="ty">string</span>&gt;
+  gaps: <span class="ty">list</span>&lt;<span class="ty">string</span>&gt;
+  recommendation: <span class="kw">one of</span> <span class="str">"strong fit"</span>, <span class="str">"possible fit"</span>, <span class="str">"weak fit"</span>, <span class="str">"no fit"</span>
+  confidence: <span class="ty">number</span> <span class="kw">between</span> <span class="num">0</span> <span class="kw">and</span> <span class="num">1</span>
+}
+
+<span class="kw">agent</span> <span class="ty">GrantChecker</span> {
+  <span class="kw">model</span>: <span class="kw">prefer</span> <span class="str">"claude-sonnet"</span> <span class="kw">fallback</span> <span class="str">"gpt-4o"</span>
+  <span class="kw">budget</span>: <span class="num">£5</span> <span class="kw">per</span> run
+  <span class="kw">memory</span>: <span class="fn">dendric</span>(<span class="str">"grant_history"</span>)
+
+  <span class="kw">step</span> <span class="fn">evaluate</span>(company: <span class="ty">document</span>, call: <span class="ty">document</span>) -> <span class="ty">FitScore</span> {
+    <span class="kw">recall</span> past_scores <span class="kw">from</span> memory <span class="kw">using</span> company
+
+    <span class="kw">let</span> score = <span class="kw">rate</span> company <span class="kw">against</span> call
+      <span class="kw">using</span> past_scores
+      <span class="kw">as</span> <span class="ty">FitScore</span>
+
+    <span class="kw">deja_vu</span> match <span class="kw">on</span> score {
+      <span class="str">"similar_rejection"</span> -> {
+        <span class="kw">respond</span> <span class="str">"Warning: similar profile was rejected for {match.grant_title}"</span>
+      }
+    }
+
+    <span class="kw">remember</span> score <span class="kw">tagged</span> company.sector, call.funder
+    <span class="kw">return</span> score
+  }
+}</pre>
+    </div>
+  </details>
+
+  <h3>Transpiler Architecture</h3>
+  <p>The transpiler is a four-stage pipeline, entirely deterministic. No AI is involved in translation — AI only enters at runtime when the generated Python calls an LLM.</p>
+
+  <div class="arch-flow">
+    <div class="arch-row">
+      <div class="arch-box">.drift source</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box accent">Lexer → Tokens</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box accent">Parser → AST</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box accent">Codegen → Python</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box green">Runtime (Agent, ModelRouter, Budget, Intent, Dendric)</div>
+    </div>
+  </div>
+
+  <h3>Implementation Status</h3>
+  <div class="callout green">
+    <strong>Working transpiler built.</strong> Lexer, parser, AST, codegen, and runtime — ~3,000 lines of Python. Three example programs transpile and execute end-to-end with mock and real (Anthropic API) providers. CLI supports <code>transpile</code>, <code>run</code>, <code>lex</code>, and <code>parse</code> commands.
+  </div>
+</section>
+
+<!-- ═══════════════════════ 3. DENDRIC MEMORY ═══════════════════════ -->
+<section>
+  <div class="section-num">03 — Dendric Memory Engine</div>
+  <h2>Biologically-Inspired Memory for Agents</h2>
+
+  <p>Dendric is a memory lifecycle engine modeled on biological memory systems. It provides four parallel retrieval paths fused via Reciprocal Rank Fusion (RRF), neurotransmitter-modeled encoding dynamics, sleep-cycle consolidation, and temporal decay. Benchmarked on LongMemEval showing <strong>+6.7pp recall</strong> over vector-only baseline on aged-corpus retrieval.</p>
+
+  <h3>Four Retrieval Paths</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-label accent">Vector</div>
+      <h4>Semantic Similarity</h4>
+      <p>Embedding-based retrieval. Finds memories that are semantically related to the query even without keyword overlap. The standard path for fuzzy matching.</p>
+    </div>
+    <div class="card">
+      <div class="card-label green">FTS5</div>
+      <h4>Full-Text Search</h4>
+      <p>SQLite FTS5 keyword matching. Fast exact-match retrieval. Catches memories that share specific terms, names, or identifiers that embeddings might miss.</p>
+    </div>
+    <div class="card">
+      <div class="card-label amber">Entity Graph</div>
+      <h4>Structural Traversal</h4>
+      <p>Knowledge graph of entities and relationships. Traversal-based retrieval finds memories connected through entity chains: Company → Sector → Funder → Past Application.</p>
+    </div>
+    <div class="card">
+      <div class="card-label purple">Associative</div>
+      <h4>Spreading Activation</h4>
+      <p>Biologically-inspired activation propagation. Nodes activate their neighbours along weighted edges. Finds memories through indirect, non-obvious connections.</p>
+    </div>
+  </div>
+
+  <h3>RRF Fusion</h3>
+  <p>All four paths run in parallel. Results are fused using Reciprocal Rank Fusion — each result's final score is the sum of <code>1 / (k + rank)</code> across all paths that returned it. This means a memory ranked highly by multiple paths scores much higher than one ranked #1 by a single path. The parameter <code>k</code> (default 60) controls how much weight is given to high-rank positions versus appearing in multiple paths.</p>
+
+  <h3>Neurotransmitter Model</h3>
+  <p>Four scalar parameters modulate memory encoding and retrieval dynamics:</p>
+
+  <table>
+    <thead><tr><th>Parameter</th><th>Biological Analog</th><th>Effect on Agent</th></tr></thead>
+    <tbody>
+      <tr><td style="color: var(--green)">Dopamine</td><td>Reward signal</td><td>Strengthens edges associated with successful outcomes. High after positive feedback or correct predictions.</td></tr>
+      <tr><td style="color: var(--amber)">Norepinephrine</td><td>Alertness</td><td>Lowers recognition threshold for <code>deja_vu</code>. High during critical tasks. Makes the agent more likely to notice connections.</td></tr>
+      <tr><td style="color: var(--cyan)">Acetylcholine</td><td>Attention/focus</td><td>Focuses activation propagation along task-relevant edges rather than spreading diffusely. Narrows retrieval scope.</td></tr>
+      <tr><td style="color: var(--purple)">Serotonin</td><td>Stability</td><td>Modulates graph restructuring aggressiveness. High serotonin = conservative consolidation, preserving existing structure.</td></tr>
+    </tbody>
+  </table>
+
+  <p>Implementation note: these are not literal neurotransmitter simulations. They are four parameterised scalars that modulate edge weights, activation thresholds, propagation breadth, and consolidation intensity. The biological framing is the conceptual model; the implementation is parameterised graph dynamics.</p>
+
+  <h3>Temporal Decay & Consolidation</h3>
+  <p>Memories decay over time using a hybrid exponential + power-law curve. Frequently-accessed or strongly-encoded memories decay slower (the "use it or lose it" principle). Consolidation cycles run at agent boundaries — when a pipeline completes, short-term step outputs merge into long-term memory, weak memories are pruned, and entity graph connections are strengthened or weakened based on co-occurrence.</p>
+</section>
+
+<!-- ═══════════════════════ 4. MEMORY PRIMITIVES ═══════════════════════ -->
+<section>
+  <div class="section-num">04 — Memory Primitives</div>
+  <h2>Five Keywords for Agent Memory</h2>
+  
+  <p>The Drift language exposes Dendric through five memory primitives. Together they cover the complete lifecycle of agent memory: encoding, retrieval, recognition, organisation, and forgetting.</p>
+
+  <table>
+    <thead><tr><th>Keyword</th><th>Direction</th><th>Biological Analog</th><th>Dendric Mechanism</th></tr></thead>
+    <tbody>
+      <tr><td><code style="color: var(--green)">remember</code></td><td>Write</td><td>Encoding</td><td>Multi-path index, entity graph linking, neurotransmitter-modulated strength</td></tr>
+      <tr><td><code style="color: var(--accent)">recall</code></td><td>Active read</td><td>Conscious retrieval</td><td>RRF-fused four-path search</td></tr>
+      <tr><td><code style="color: var(--purple)">deja_vu</code></td><td>Passive read</td><td>Involuntary recognition</td><td>Background spreading activation with threshold detection</td></tr>
+      <tr><td><code style="color: var(--amber)">tagged</code></td><td>Organise</td><td>Categorical memory</td><td>Entity graph nodes and edges, hierarchical context</td></tr>
+      <tr><td><code style="color: var(--red)">forget</code></td><td>Delete</td><td>Active forgetting</td><td>Accelerated temporal decay, targeted pruning</td></tr>
+    </tbody>
+  </table>
+
+  <!-- REMEMBER -->
+  <details>
+    <summary><code style="color: var(--green)">remember</code> — Intentional encoding</summary>
+    <div class="content">
+      <p>The agent has learned something and wants to persist it. An explicit, intentional store — the agent knows this matters. Triggers encoding with entity graph linking and high dopamine encoding strength.</p>
+<pre><span class="cm">-- Basic remember</span>
+<span class="kw">remember</span> score <span class="kw">tagged</span> <span class="str">"healthcare"</span>, <span class="str">"innovate_uk"</span>
+
+<span class="cm">-- Remember with entity links from the data</span>
+<span class="kw">remember</span> score <span class="kw">tagged</span> company.sector, call.funder
+
+<span class="cm">-- Hierarchical context</span>
+<span class="kw">remember</span> analysis <span class="kw">tagged</span> project.domain > project.sub_domain > task_type</pre>
+
+      <h4>Transpiles to:</h4>
+<pre><span class="cm"># Dendric encoding with entity linking</span>
+<span class="kw">await</span> self.memory.encode(
+    data=score,
+    tags=[<span class="str">"healthcare"</span>, <span class="str">"innovate_uk"</span>],
+    encoding_strength=self._agent_state.dopamine,
+    entity_links=self.memory.graph.extract_entities(score),
+)</pre>
+    </div>
+  </details>
+
+  <!-- RECALL -->
+  <details>
+    <summary><code style="color: var(--accent)">recall</code> — Active retrieval</summary>
+    <div class="content">
+      <p>The agent deliberately searches its memory for relevant context. Conscious retrieval — the agent knows it needs information and goes looking. Triggers RRF-fused four-path search.</p>
+<pre><span class="cm">-- Basic recall</span>
+<span class="kw">recall</span> past_evaluations <span class="kw">from</span> memory <span class="kw">using</span> company_profile
+
+<span class="cm">-- Scoped recall with context tags</span>
+<span class="kw">recall</span> past_scores <span class="kw">from</span> memory
+  <span class="kw">tagged</span> <span class="str">"innovate_uk"</span>
+  <span class="kw">using</span> company_profile
+
+<span class="cm">-- Recall with limit</span>
+<span class="kw">recall</span> recent_cases <span class="kw">from</span> memory <span class="kw">using</span> query <span class="kw">limit</span> <span class="num">5</span></pre>
+
+      <h4>Transpiles to:</h4>
+<pre><span class="cm"># Dendric RRF-fused multi-path retrieval</span>
+past_evaluations = <span class="kw">await</span> self.memory.recall(
+    query=company_profile,
+    tags=None,
+    limit=<span class="num">10</span>,
+    paths=[<span class="str">"vector"</span>, <span class="str">"fts5"</span>, <span class="str">"entity_graph"</span>, <span class="str">"associative"</span>],
+    rrf_k=<span class="num">60</span>,
+)</pre>
+    </div>
+  </details>
+
+  <!-- DEJA VU -->
+  <details open>
+    <summary><code style="color: var(--purple)">deja_vu</code> — Involuntary recognition</summary>
+    <div class="content">
+      <p>The defining primitive. The agent didn't ask to remember. It just <em>noticed</em>. The spreading activation network fires in the background, continuously comparing incoming patterns against stored patterns. When something crosses the recognition threshold, the agent becomes aware.</p>
+
+      <div class="callout">
+        <strong>Key distinction:</strong> <code>recall</code> is "go find me X." <code>deja_vu</code> is "if anything in memory resonates with what I'm currently looking at, surface it." Reactive, not proactive.
+      </div>
+
+<pre><span class="kw">agent</span> <span class="ty">GrantChecker</span> {
+  <span class="kw">memory</span>: <span class="fn">dendric</span>(<span class="str">"grant_history"</span>)
+
+  <span class="kw">step</span> <span class="fn">evaluate</span>(company: <span class="ty">document</span>, call: <span class="ty">document</span>) -> <span class="ty">FitScore</span> {
+    <span class="kw">let</span> score = <span class="kw">rate</span> company <span class="kw">against</span> call <span class="kw">as</span> <span class="ty">FitScore</span>
+
+    <span class="cm">-- The agent recognizes a pattern it's seen before</span>
+    <span class="kw">deja_vu</span> match <span class="kw">on</span> score {
+      <span class="str">"similar_rejection"</span> -> {
+        <span class="kw">respond</span> <span class="str">"Warning: similar profile was rejected for {match.grant_title}"</span>
+        <span class="kw">let</span> score = score <span class="kw">with</span> { confidence: score.confidence * <span class="num">0.7</span> }
+      }
+      <span class="str">"successful_pattern"</span> -> {
+        <span class="kw">respond</span> <span class="str">"Pattern matches previous successful application"</span>
+      }
+    }
+
+    <span class="kw">return</span> score
+  }
+}</pre>
+
+      <h4>How deja_vu works at the engine level:</h4>
+      <ol style="padding-left: 20px; margin: 12px 0;">
+        <li style="margin-bottom: 8px; font-size: 14px;"><strong>Entity extraction</strong> — extract seed entities from the current step context</li>
+        <li style="margin-bottom: 8px; font-size: 14px;"><strong>Seed activation</strong> — activate corresponding nodes in the entity graph</li>
+        <li style="margin-bottom: 8px; font-size: 14px;"><strong>Bounded propagation</strong> — spread activation 1-2 hops along weighted edges (milliseconds, not seconds)</li>
+        <li style="margin-bottom: 8px; font-size: 14px;"><strong>Threshold modulation</strong> — norepinephrine level adjusts recognition sensitivity</li>
+        <li style="margin-bottom: 8px; font-size: 14px;"><strong>Pattern matching</strong> — if any non-seed node crosses the threshold, retrieve its associated memory</li>
+        <li style="margin-bottom: 8px; font-size: 14px;"><strong>Classification</strong> — classify the match type ("similar_rejection", "successful_pattern") for the match block</li>
+      </ol>
+
+      <h4>Transpiles to:</h4>
+<pre><span class="cm"># Passive recognition check via Dendric spreading activation</span>
+_deja_vu_result = <span class="kw">await</span> self.memory.deja_vu.check(
+    context=score,
+    agent_state=self._agent_state,
+)
+
+<span class="kw">if</span> _deja_vu_result <span class="kw">is not</span> None:
+    match = _deja_vu_result
+    <span class="kw">if</span> match.pattern_type == <span class="str">"similar_rejection"</span>:
+        self.output(f<span class="str">"Warning: similar profile was rejected for {match.memory.grant_title}"</span>)
+        score = replace(score, confidence=score.confidence * <span class="num">0.7</span>)
+    <span class="kw">elif</span> match.pattern_type == <span class="str">"successful_pattern"</span>:
+        self.output(<span class="str">"Pattern matches previous successful application"</span>)</pre>
+    </div>
+  </details>
+
+  <!-- TAGGED -->
+  <details>
+    <summary><code style="color: var(--amber)">tagged</code> — Context organisation</summary>
+    <div class="content">
+      <p>Tags organise memories into the entity graph. They become nodes with edges to the memories they label. Retrieval can scope by tags, and spreading activation traverses tag connections — a <code>recall</code> on "healthcare" can pull in NHS-related memories through graph traversal even if they weren't explicitly tagged with "healthcare".</p>
+<pre><span class="cm">-- Flat tags</span>
+<span class="kw">remember</span> result <span class="kw">tagged</span> <span class="str">"healthcare"</span>, <span class="str">"innovate_uk"</span>
+
+<span class="cm">-- Dynamic tags from data</span>
+<span class="kw">remember</span> result <span class="kw">tagged</span> company.sector, call.funder
+
+<span class="cm">-- Hierarchical (creates graph path)</span>
+<span class="kw">remember</span> result <span class="kw">tagged</span> domain > sub_domain > task_type
+
+<span class="cm">-- Filter recall by tags</span>
+<span class="kw">recall</span> cases <span class="kw">from</span> memory <span class="kw">tagged</span> <span class="str">"innovate_uk"</span> <span class="kw">using</span> query</pre>
+    </div>
+  </details>
+
+  <!-- FORGET -->
+  <details>
+    <summary><code style="color: var(--red)">forget</code> — Deliberate pruning</summary>
+    <div class="content">
+      <p>Agents accumulate context that becomes stale or irrelevant. <code>forget</code> triggers accelerated decay in Dendric — instead of waiting for natural consolidation to prune weak memories, the agent deliberately marks memories for removal.</p>
+<pre><span class="cm">-- Explicit target</span>
+<span class="kw">forget</span> memories <span class="kw">tagged</span> <span class="str">"deprecated_criteria"</span>
+
+<span class="cm">-- Age-based pruning</span>
+<span class="kw">forget</span> memories older than <span class="num">90d</span> <span class="kw">tagged</span> <span class="str">"market_data"</span>
+
+<span class="cm">-- Pattern-based</span>
+<span class="kw">forget</span> memories <span class="kw">where</span> confidence &lt; <span class="num">0.3</span></pre>
+    </div>
+  </details>
+</section>
+
+<!-- ═══════════════════════ 5. ADAPTIVE KNOWLEDGE GRAPH ═══════════════════════ -->
+<section>
+  <div class="section-num">05 — Adaptive Knowledge Graph</div>
+  <h2>Dynamic Graph Architecture for <code>deja_vu</code></h2>
+
+  <p>Standard knowledge graphs are passive data structures — you query them, you get results. <code>deja_vu</code> requires an <em>active</em> graph that does work even when nobody asked it a question. Three capabilities beyond standard graph databases:</p>
+
+  <h3>1. Continuous Activation Propagation</h3>
+  <p>Unlike query-time spreading activation (used by <code>recall</code>), <code>deja_vu</code> needs a lightweight activation pass that runs whenever new context enters the agent. Incoming context activates seed nodes, activation spreads outward along weighted edges (bounded to 2 hops), and if any node's activation exceeds the recognition threshold, a match fires.</p>
+  
+  <div class="callout">
+    <strong>Performance note:</strong> Two hops on a pruned graph with a few thousand nodes is milliseconds, not seconds. The propagation is bounded BFS with weight thresholds, not a full graph traversal.
+  </div>
+
+  <h3>2. Dynamic Edge Weights</h3>
+  <p>In a standard knowledge graph, the edge between "TechCo" and "healthcare" has a fixed weight. In the adaptive graph, edge weights change based on:</p>
+  <ul>
+    <li><strong>Usage frequency</strong> — edges traversed during successful retrievals get stronger</li>
+    <li><strong>Temporal decay</strong> — unused edges weaken over time (exponential + power-law hybrid)</li>
+    <li><strong>Outcome reinforcement</strong> — edges associated with correct predictions get a dopamine boost</li>
+    <li><strong>Negative feedback</strong> — edges associated with false positives (unnecessary <code>deja_vu</code> triggers) get dampened</li>
+  </ul>
+
+  <h3>3. Subgraph Pattern Recognition</h3>
+  <p>Simple <code>deja_vu</code> is "I've seen this entity before." Interesting <code>deja_vu</code> is "I've seen this <em>pattern</em> before" — a small healthcare company applying for an Innovate UK grant with strong technical credentials but weak commercialisation narrative. That's a subgraph pattern, not a single node.</p>
+
+  <h4>Two approaches (v1 → v2):</h4>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-label green">V1 — Structural Fingerprints</div>
+      <h4>Ship now</h4>
+      <p>Hash the key structural pattern (sector + funder + company_size + outcome) into a fingerprint. Store it. On new context, compute fingerprint, check for collisions. O(1) lookup, exact structural match only. Good enough for launch.</p>
+    </div>
+    <div class="card">
+      <div class="card-label purple">V2 — Learned Pattern Embeddings</div>
+      <h4>Ship later</h4>
+      <p>Embed the local subgraph around each evaluation into a dense vector — not just text, but structural relationships. New context gets its structural embedding and similarity search finds fuzzy subgraph matches. "This <em>feels</em> like that time..."</p>
+    </div>
+  </div>
+
+  <h3>DejaVu Engine (Core Algorithm)</h3>
+<pre><span class="kw">class</span> <span class="ty">DejaVuEngine</span>:
+    <span class="kw">def</span> __init__(self, graph, threshold=<span class="num">0.7</span>):
+        self.graph = graph
+        self.base_threshold = threshold
+
+    <span class="kw">async def</span> <span class="fn">check</span>(self, context, agent_state=None):
+        <span class="cm"># 1. Extract entities from incoming context</span>
+        seeds = self.graph.extract_entities(context)
+
+        <span class="cm"># 2. Activate seed nodes (base activation + residual from prior access)</span>
+        activations = {}
+        <span class="kw">for</span> entity <span class="kw">in</span> seeds:
+            node = self.graph.get_node(entity)
+            <span class="kw">if</span> node:
+                activations[node.id] = node.base_activation + node.residual
+
+        <span class="cm"># 3. Spread activation — bounded BFS, 2 hops max</span>
+        spread = self.graph.propagate(activations, max_hops=<span class="num">2</span>)
+
+        <span class="cm"># 4. Modulate threshold (norepinephrine lowers it → more sensitive)</span>
+        threshold = self.base_threshold
+        <span class="kw">if</span> agent_state:
+            threshold *= agent_state.norepinephrine_factor
+
+        <span class="cm"># 5. Check for recognition (exclude seed nodes — don't match input itself)</span>
+        matches = [
+            (node_id, activation)
+            <span class="kw">for</span> node_id, activation <span class="kw">in</span> spread.items()
+            <span class="kw">if</span> activation > threshold <span class="kw">and</span> node_id <span class="kw">not in</span> seeds
+        ]
+
+        <span class="kw">if not</span> matches:
+            <span class="kw">return</span> None
+
+        <span class="cm"># 6. Retrieve memory associated with strongest match</span>
+        best = max(matches, key=<span class="kw">lambda</span> x: x[<span class="num">1</span>])
+        memory = self.graph.get_memory(best[<span class="num">0</span>])
+
+        <span class="kw">return</span> <span class="ty">DejaVuMatch</span>(
+            memory=memory,
+            activation=best[<span class="num">1</span>],
+            pattern_type=self.classify_match(seeds, best[<span class="num">0</span>]),
+        )</pre>
+
+  <h3>Dendric Module Architecture</h3>
+  <div class="tree">
+<span class="dir">dendric/</span>
+├── <span class="dir">graph/</span>
+│   ├── <span class="file">nodes.py</span>          <span class="desc">Entity nodes with activation levels</span>
+│   ├── <span class="file">edges.py</span>          <span class="desc">Weighted edges with dynamic decay/reinforcement</span>
+│   ├── <span class="file">propagation.py</span>    <span class="desc">Spreading activation (bounded BFS)</span>
+│   └── <span class="file">patterns.py</span>       <span class="desc">Subgraph fingerprinting + embedding (v2)</span>
+├── <span class="dir">dynamics/</span>
+│   ├── <span class="file">modulation.py</span>     <span class="desc">Neurotransmitter-inspired parameter modulation</span>
+│   ├── <span class="file">decay.py</span>          <span class="desc">Temporal decay curves (exponential + power-law)</span>
+│   └── <span class="file">consolidation.py</span>  <span class="desc">Sleep-cycle memory consolidation</span>
+├── <span class="dir">retrieval/</span>
+│   ├── <span class="file">vector.py</span>         <span class="desc">Embedding similarity</span>
+│   ├── <span class="file">fts5.py</span>           <span class="desc">Full-text search (SQLite FTS5)</span>
+│   ├── <span class="file">graph.py</span>          <span class="desc">Entity graph traversal</span>
+│   ├── <span class="file">associative.py</span>    <span class="desc">Spreading activation retrieval</span>
+│   ├── <span class="file">fusion.py</span>         <span class="desc">RRF fusion across paths</span>
+│   └── <span class="file">deja_vu.py</span>        <span class="desc">Passive recognition engine ★ NEW</span>
+└── <span class="dir">storage/</span>
+    └── <span class="file">sqlite.py</span>         <span class="desc">SQLite backend with FTS5</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 6. VOICE ARCHITECTURE ═══════════════════════ -->
+<section>
+  <div class="section-num">06 — Voice Architecture</div>
+  <h2>Layered Response Model</h2>
+
+  <p>The voice interface uses temporal model routing — the fast model isn't a fallback, it's a bridge. It holds the conversation while the real thinking happens behind it.</p>
+
+  <h3>The Layering Problem (Solved)</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-label green">Layer 1 — STT</div>
+      <h4>Deepgram</h4>
+      <p>Speech-to-text. ~200-300ms latency. Cheap at scale. Streams partial transcripts for early intent classification.</p>
+    </div>
+    <div class="card">
+      <div class="card-label amber">Layer 2 — Bridge Response</div>
+      <h4>Gemini Flash</h4>
+      <p>Instant acknowledgment. &lt;500ms. Generates a contextual bridge response ("Let me check that..." / "Good question about...") that starts speaking immediately.</p>
+    </div>
+    <div class="card">
+      <div class="card-label accent">Layer 3 — Reasoning</div>
+      <h4>Claude Sonnet/Opus</h4>
+      <p>Full reasoning. 2-3s. Runs in parallel with the bridge. When ready, the voice output crossfades from the bridge to the real answer seamlessly.</p>
+    </div>
+    <div class="card">
+      <div class="card-label purple">Layer 4 — TTS</div>
+      <h4>ElevenLabs</h4>
+      <p>Text-to-speech with native interrupt handling. When the reasoning model's answer arrives, ElevenLabs handles the smooth crossfade from the bridge response.</p>
+    </div>
+  </div>
+
+  <h3>Language Primitive: <code>stream...then...</code></h3>
+  <p>Drift expresses temporal model routing as a language-level construct. The transpiler generates concurrent execution — the bridge and reasoning models run in parallel.</p>
+
+<pre><span class="kw">agent</span> <span class="ty">Jarvis</span> {
+  <span class="kw">model</span>: <span class="kw">stream</span> <span class="str">"gemini-flash"</span> <span class="kw">then</span> <span class="str">"claude-sonnet"</span>
+  <span class="kw">voice</span>: <span class="fn">eleven_labs</span>(voice: <span class="str">"jarvis"</span>, interrupts: <span class="num">true</span>)
+  <span class="kw">memory</span>: <span class="fn">dendric</span>(<span class="str">"jarvis_core"</span>)
+
+  <span class="kw">step</span> <span class="fn">respond</span>(utterance: <span class="ty">string</span>) {
+    <span class="cm">-- Flash fires immediately, starts speaking</span>
+    <span class="kw">let</span> quick = <span class="kw">generate</span> acknowledgment <span class="kw">as</span> <span class="ty">string</span>
+    <span class="kw">respond</span> quick
+
+    <span class="cm">-- Meanwhile, the real reasoning happens</span>
+    <span class="kw">recall</span> context <span class="kw">from</span> memory <span class="kw">using</span> utterance
+
+    <span class="kw">deja_vu</span> match <span class="kw">on</span> utterance {
+      <span class="str">"recurring_question"</span> -> {
+        <span class="kw">respond</span> <span class="str">"You asked about this last week — {match.previous_answer}"</span>
+        <span class="kw">return</span>
+      }
+    }
+
+    <span class="kw">let</span> answer = <span class="kw">answer</span> utterance <span class="kw">using</span> context <span class="kw">as</span> <span class="ty">string</span>
+    <span class="kw">respond</span> answer
+
+    <span class="kw">remember</span> answer <span class="kw">tagged</span> utterance.intent
+  }
+}</pre>
+
+  <h3>Latency Chain</h3>
+  <div class="arch-flow">
+    <div class="arch-row">
+      <div class="arch-box">Voice Input</div>
+    </div>
+    <div class="arch-arrow">↓ ~250ms</div>
+    <div class="arch-row">
+      <div class="arch-box green">Deepgram STT</div>
+    </div>
+    <div class="arch-arrow">↓ ~100ms</div>
+    <div class="arch-row">
+      <div class="arch-box amber">Intent Classification (Haiku)</div>
+      <div class="arch-box accent" style="opacity: 0.5;">Reasoning begins (Sonnet) →</div>
+    </div>
+    <div class="arch-arrow">↓ ~300ms</div>
+    <div class="arch-row">
+      <div class="arch-box amber">Flash Bridge Response → TTS → Speaking</div>
+    </div>
+    <div class="arch-arrow">↓ ~1500ms (parallel)</div>
+    <div class="arch-row">
+      <div class="arch-box accent">Sonnet response ready → TTS → Crossfade</div>
+    </div>
+  </div>
+  <p style="font-size: 13px; color: var(--text-muted); margin-top: 8px;">First voice output in &lt;1 second. Full answer in ~2-3 seconds. Feels conversational — like someone saying "hmm" while thinking, then giving the real answer.</p>
+  
+  <h3>Cost Model</h3>
+  <p>50-100 voice interactions per day at heavy use. Each: Deepgram STT (fractions of a cent), one Flash call (fractions of a cent), one Sonnet call (a few cents), one ElevenLabs TTS (pro tier). Total: approximately <strong>£3-5/day</strong>. Drift's budget primitive caps it automatically — <code>budget: £5 per day</code> — and the router degrades gracefully under budget pressure (stays on Flash longer, defers non-urgent reasoning, batches consolidation).</p>
+</section>
+
+<!-- ═══════════════════════ 7. JARVIS ARCHITECTURE ═══════════════════════ -->
+<section>
+  <div class="section-num">07 — Personal Agent Architecture</div>
+  <h2>The Jarvis Pattern</h2>
+
+  <p>The full system — Drift language + Dendric memory + voice interface — enables a personal AI agent that <em>thinks</em>, <em>remembers</em>, and <em>speaks</em>. The architecture is a multi-agent graph where every node is a <code>.drift</code> file sharing a unified Dendric memory.</p>
+
+  <h3>System Architecture</h3>
+  <div class="arch-flow">
+    <div class="arch-row">
+      <div class="arch-box">Voice Input (Deepgram)</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box amber">Intent Router (Drift agent — Haiku)</div>
+    </div>
+    <div class="arch-arrow">↓ classifies intent →</div>
+    <div class="arch-row">
+      <div class="arch-box accent">Calendar Agent</div>
+      <div class="arch-box green">Pintail Agent</div>
+      <div class="arch-box purple">Grant Agent</div>
+      <div class="arch-box cyan">Compose Agent</div>
+    </div>
+    <div class="arch-arrow">↕ all share ↕</div>
+    <div class="arch-row">
+      <div class="arch-box purple">Dendric Memory (shared across all agents)</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box">Voice Output (ElevenLabs)</div>
+    </div>
+  </div>
+
+  <h3>Key Properties</h3>
+  <ul>
+    <li><strong>Every box is a .drift file.</strong> The intent router is itself a Drift agent — <code>classify utterance as Intent</code> — running on Haiku because intent classification is cheap.</li>
+    <li><strong>Shared memory creates unified intelligence.</strong> When the grant checker learns about a company, the compose agent can reference it when drafting an email. When Pintail spots a rare aircraft, the reasoning agent can connect it to the defense news you read that morning.</li>
+    <li><strong><code>deja_vu</code> in voice is the uncanny moment.</strong> The agent interrupts — not because you asked, but because spreading activation fired. "Hey, this funder rejected a similar application last month. The feedback was about weak commercialisation." You didn't ask. The agent noticed.</li>
+    <li><strong>Feedback trains the system.</strong> "Good catch" → dopamine signal → strengthen the edges that triggered recognition. "Yeah I know" → nudge the threshold up for that pattern type. The system learns what's worth flagging without explicit configuration.</li>
+  </ul>
+
+  <h3>Hardware Roadmap</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-label green">Now — API-based</div>
+      <h4>Everything runs on APIs</h4>
+      <p>Deepgram, Gemini Flash, Claude, ElevenLabs. Works today. £3-5/day at heavy use. Drift's budget primitive manages cost automatically.</p>
+    </div>
+    <div class="card">
+      <div class="card-label purple">Later — Local inference</div>
+      <h4>Blackwell GPU(s) + custom PC</h4>
+      <p>Move STT and flash model local. Shave network latency and eliminate API costs for the bridge layer. Frontier reasoning stays API-based (or local Opus-class when hardware allows). Always-on agent running through Drift.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 8. MCP INTEGRATION ═══════════════════════ -->
+<section>
+  <div class="section-num">08 — Tool Integration</div>
+  <h2>MCP as a First-Class Primitive</h2>
+
+  <p>Anthropic's Model Context Protocol (MCP) is becoming the standard for how agents interact with external tools. If Drift has native MCP support, every MCP server in the ecosystem becomes a Drift tool automatically.</p>
+
+<pre><span class="kw">tool</span> <span class="fn">slack</span> <span class="kw">from</span> <span class="str">"mcp://slack-server"</span> {
+  <span class="fn">send_message</span>(channel: <span class="ty">string</span>, text: <span class="ty">string</span>)
+  <span class="fn">search_messages</span>(query: <span class="ty">string</span>) -> <span class="ty">list</span>&lt;<span class="ty">Message</span>&gt;
+}
+
+<span class="kw">tool</span> <span class="fn">calendar</span> <span class="kw">from</span> <span class="str">"mcp://google-calendar"</span> {
+  <span class="fn">get_events</span>(date: <span class="ty">string</span>) -> <span class="ty">list</span>&lt;<span class="ty">Event</span>&gt;
+  <span class="fn">create_event</span>(title: <span class="ty">string</span>, time: <span class="ty">timestamp</span>)
+}
+
+<span class="kw">agent</span> <span class="ty">Notifier</span> {
+  <span class="kw">step</span> <span class="fn">alert</span>(result: <span class="ty">FitScore</span>) {
+    <span class="kw">if</span> result.overall_score > <span class="num">70</span> {
+      slack.<span class="fn">send_message</span>(
+        channel: <span class="str">"grants"</span>,
+        text: <span class="str">"Strong match: {result.company_name} — {result.overall_score}/100"</span>
+      )
+    }
+  }
+}</pre>
+
+  <p>No SDK. No API client. No auth boilerplate. Declare the tool, the runtime handles the MCP connection. The generated Python manages the protocol, serialisation, and connection lifecycle.</p>
+</section>
+
+<!-- ═══════════════════════ 9. MULTI-AGENT ═══════════════════════ -->
+<section>
+  <div class="section-num">09 — Multi-Agent Composition</div>
+  <h2>Agents Calling Agents</h2>
+
+  <p>Real systems aren't one agent — they're networks. Drift makes inter-agent calls look like step calls, with the <code>parallel</code> keyword for concurrent fan-out.</p>
+
+<pre><span class="kw">agent</span> <span class="ty">GrantPipeline</span> {
+  <span class="kw">memory</span>: <span class="fn">dendric</span>(<span class="str">"pipeline_history"</span>)
+
+  <span class="kw">step</span> <span class="fn">process</span>(company: <span class="ty">document</span>, calls: <span class="ty">list</span>&lt;<span class="ty">document</span>&gt;) -> <span class="ty">Report</span> {
+    <span class="cm">-- Fan out: check each grant call in parallel</span>
+    <span class="kw">let</span> scores = []
+    <span class="kw">for each</span> call <span class="kw">in</span> calls <span class="kw">parallel</span> {
+      <span class="kw">let</span> score = <span class="ty">GrantChecker</span>.<span class="fn">evaluate</span>(company, call)
+      scores.<span class="fn">add</span>(score)
+    }
+
+    <span class="cm">-- Synthesize results</span>
+    <span class="kw">let</span> report = <span class="kw">summarize</span> scores <span class="kw">as</span> <span class="ty">Report</span>
+
+    <span class="kw">remember</span> report <span class="kw">tagged</span> company.name, <span class="str">"pipeline_run"</span>
+    <span class="kw">return</span> report
+  }
+}</pre>
+
+  <p>One agent calling another agent's steps. The <code>parallel</code> keyword means they fan out concurrently. The runtime handles orchestration, error propagation, and cost aggregation across agents. A pipeline that would be 200+ lines of LangGraph reads like English.</p>
+</section>
+
+<!-- ═══════════════════════ 10. DISTRIBUTION ═══════════════════════ -->
+<section>
+  <div class="section-num">10 — Distribution Strategy</div>
+  <h2>Getting This Into the World</h2>
+
+  <h3>Why Languages Fail (and How This One Won't)</h3>
+  <p>Almost all new programming languages die. The ones that survive have one of three things: a killer app that forces adoption (Ruby → Rails), institutional backing (Go → Google), or they start as a narrow DSL in a specific domain and expand outward (SQL, Terraform, HCL). Drift targets the third path — start as the agent DSL, expand from there.</p>
+
+  <h3>Four Parallel Tracks</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-label green">Track 1 — Open Source + Content</div>
+      <h4>GitHub + Launch Post</h4>
+      <p>Not "I built a language." Instead: "Why every AI agent framework is solving the wrong problem." Show the grant checker side-by-side: 15 lines of Drift ↔ 97 lines of generated Python. Same behaviour. One is readable by a grant consultant. Share in Zach Rattner's Slack, the AI agents networking group (30/500), Sam Coope's network.</p>
+    </div>
+    <div class="card">
+      <div class="card-label amber">Track 2 — Dogfood at Pitchwits</div>
+      <h4>Production proof</h4>
+      <p>Build a .drift → pipeline feature where customers can see/edit agent logic evaluating their grants. Competitive moat — no other grant platform lets you inspect the reasoning chain in a readable language. Makes the product transparent and trustable.</p>
+    </div>
+    <div class="card">
+      <div class="card-label accent">Track 3 — Aerospace / Defense-Tech</div>
+      <h4>Fleetcraft angle</h4>
+      <p>Deployment strategy for autonomous systems = constraint-bounded agent orchestration. "This drone should classify terrain, rate landing zones, select optimal — within fuel budget, with fallback to manual if confidence &lt;0.8." That's a .drift program. Language-level thinking about agent deployment is a tier above writing Python.</p>
+    </div>
+    <div class="card">
+      <div class="card-label purple">Track 4 — Academic</div>
+      <h4>Workshop paper</h4>
+      <p>"Intent-Based Programming Paradigms with Biologically-Inspired Memory Primitives for Agentic AI Systems." Language spec + transpiler + Dendric integration + production deployment. Target: SPLASH, OOPSLA, or AI engineering conference workshops.</p>
+    </div>
+  </div>
+
+  <h3>The Bolt / Lovable / Base44 Play</h3>
+  <p>These platforms generate applications from natural language. When they generate agent behaviour, they currently emit raw API calls and boilerplate. Drift could be the intermediate representation — instead of generating 200 lines of Python, they generate a <code>.drift</code> file. The transpiler handles the rest. Users can read and modify the <code>.drift</code> output. The <code>dendric()</code> declaration gives agents memory for free — one line in the config, no vector database setup.</p>
+  
+  <div class="callout">
+    <strong>Infrastructure play:</strong> Drift becomes the compilation target for agent behaviour the same way LLVM IR is the compilation target for compiled languages. Multiple frontends (Lovable, Bolt, Claude Artifacts, ChatGPT) can emit <code>.drift</code> as their agent layer.
+  </div>
+
+  <h3>Target Audiences</h3>
+  <table>
+    <thead><tr><th>Audience</th><th>Value Proposition</th><th>Entry Point</th></tr></thead>
+    <tbody>
+      <tr><td><strong>AI Engineers</strong></td><td>Eliminates boilerplate. 70% of time currently spent on plumbing (retry, prompt, parse, cost, memory). Drift handles all of it.</td><td>Open source, HN post, GitHub</td></tr>
+      <tr><td><strong>Startups</strong></td><td>Faster path to production. Write .drift files and ship instead of spending 3 months building infrastructure.</td><td>YC/startup networks, content</td></tr>
+      <tr><td><strong>Researchers</strong></td><td>Formal programming model for agent behaviour. Publish agent architectures as executable .drift files.</td><td>Workshop paper, benchmarks</td></tr>
+      <tr><td><strong>Domain Experts</strong></td><td>Read and modify agent logic without touching Python. Grant consultants, analysts, operators.</td><td>Pitchwits integration, demos</td></tr>
+      <tr><td><strong>Platform Builders</strong></td><td>IR for agent generation. One-line memory with Dendric. Readable output for end users.</td><td>Direct partnership / integration</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══════════════════════ 11. COMPETITIVE POSITION ═══════════════════════ -->
+<section>
+  <div class="section-num">11 — Competitive Landscape</div>
+  <h2>Where Drift + Dendric Sits</h2>
+
+  <table>
+    <thead><tr><th>System</th><th>What It Is</th><th>What It's Missing</th></tr></thead>
+    <tbody>
+      <tr><td><strong>LangChain</strong></td><td>Python library for LLM orchestration</td><td>No language-level abstraction. No native memory. Cost tracking is opt-in.</td></tr>
+      <tr><td><strong>DSPy</strong></td><td>Prompt optimisation framework</td><td>Academic. No cost model. No memory. Not readable by non-engineers.</td></tr>
+      <tr><td><strong>CrewAI</strong></td><td>Multi-agent orchestration</td><td>No intent-level primitives. No adaptive memory. No budget enforcement.</td></tr>
+      <tr><td><strong>LangGraph</strong></td><td>Graph-based agent workflows</td><td>Verbose. No language abstraction. Memory is external.</td></tr>
+      <tr><td><strong>Mem0 / Zep</strong></td><td>Memory layers for LLMs</td><td>Key-value with embeddings. No spreading activation, no temporal decay, no deja_vu.</td></tr>
+      <tr><td><strong>Instructor</strong></td><td>Structured output from LLMs</td><td>Single-concern library. No agents, no memory, no cost model.</td></tr>
+      <tr><td style="color: var(--accent)"><strong>Drift + Dendric</strong></td><td><strong>Integrated cognitive architecture expressed as a language</strong></td><td style="color: var(--green)">Intent verbs + adaptive memory + cost enforcement + progressive disclosure. Co-designed from first principles.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>The Next.js analogy:</strong> React was the rendering primitive. Vercel built the opinionated, complete framework around it — routing, SSR, deployment. React by itself required a stack of decisions. Next.js was opinionated and complete. Drift + Dendric is opinionated and complete for agents.
+  </div>
+</section>
+
+<!-- ═══════════════════════ 12. REPO STRUCTURE ═══════════════════════ -->
+<section>
+  <div class="section-num">12 — Repository Structure</div>
+  <h2>Project Layout</h2>
+
+  <div class="tree">
+<span class="dir">drift/</span>
+├── <span class="dir">drift/</span>                  <span class="desc">Transpiler</span>
+│   ├── <span class="file">__init__.py</span>
+│   ├── <span class="file">lexer.py</span>           <span class="desc">Tokeniser (handles £/$€, durations, interpolation)</span>
+│   ├── <span class="file">ast_nodes.py</span>       <span class="desc">AST node definitions</span>
+│   ├── <span class="file">parser.py</span>          <span class="desc">Recursive descent parser</span>
+│   ├── <span class="file">codegen.py</span>         <span class="desc">AST → Python code generator</span>
+│   └── <span class="file">cli.py</span>             <span class="desc">CLI (transpile, run, lex, parse)</span>
+├── <span class="dir">runtime/</span>               <span class="desc">Agent runtime library</span>
+│   ├── <span class="file">agent.py</span>           <span class="desc">Agent base class</span>
+│   ├── <span class="file">model.py</span>           <span class="desc">ModelRouter (multi-provider, cost-aware)</span>
+│   ├── <span class="file">budget.py</span>          <span class="desc">Budget + CostTracker</span>
+│   ├── <span class="file">intent.py</span>          <span class="desc">Intent verb → LLM call translation</span>
+│   ├── <span class="file">checkpoint.py</span>      <span class="desc">Durable step state</span>
+│   └── <span class="file">providers/</span>         <span class="desc">Anthropic, OpenAI, Mock</span>
+├── <span class="dir">dendric/</span>               <span class="desc">Memory engine</span>
+│   ├── <span class="dir">graph/</span>             <span class="desc">Adaptive knowledge graph</span>
+│   ├── <span class="dir">dynamics/</span>           <span class="desc">Modulation, decay, consolidation</span>
+│   ├── <span class="dir">retrieval/</span>          <span class="desc">Vector, FTS5, entity, associative, deja_vu</span>
+│   └── <span class="dir">storage/</span>            <span class="desc">SQLite backend</span>
+├── <span class="dir">voice/</span>                 <span class="desc">Voice interface (optional)</span>
+│   ├── <span class="file">stt.py</span>             <span class="desc">Deepgram integration</span>
+│   ├── <span class="file">tts.py</span>             <span class="desc">ElevenLabs integration</span>
+│   └── <span class="file">bridge.py</span>          <span class="desc">Temporal model routing (stream...then)</span>
+├── <span class="dir">examples/</span>              <span class="desc">.drift example programs</span>
+│   ├── <span class="file">hello.drift</span>
+│   ├── <span class="file">inbox_sorter.drift</span>
+│   ├── <span class="file">grant_checker.drift</span>
+│   └── <span class="file">jarvis.drift</span>
+├── <span class="dir">vscode/</span>                <span class="desc">VS Code syntax highlighting</span>
+│   └── <span class="file">drift.tmLanguage.json</span>
+├── <span class="dir">docs/</span>                  <span class="desc">Documentation</span>
+│   ├── <span class="file">spec.html</span>          <span class="desc">This document</span>
+│   ├── <span class="file">tutorial.md</span>
+│   └── <span class="file">api.md</span>
+├── <span class="file">pyproject.toml</span>
+├── <span class="file">README.md</span>
+└── <span class="file">LICENSE</span>               <span class="desc">MIT</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 13. ROADMAP ═══════════════════════ -->
+<section>
+  <div class="section-num">13 — Roadmap</div>
+  <h2>Implementation Sequence</h2>
+
+  <div class="card-grid">
+    <div class="card full">
+      <div class="card-label green">Phase 1 — Dendric Integration (this week)</div>
+      <h4>Add memory keywords to the working transpiler</h4>
+      <p>Add <code>remember</code>, <code>recall</code>, <code>deja_vu</code>, <code>forget</code>, <code>tagged</code> to lexer/parser/AST/codegen. Wire Dendric engine into the runtime. V1 <code>deja_vu</code> uses simplified vector similarity + threshold (ship the keyword now, ship the science later). Get the grant_checker example running with actual memory across invocations. Spec is complete — Claude Code can execute this.</p>
+    </div>
+    <div class="card">
+      <div class="card-label amber">Phase 2 — Open Source Prep</div>
+      <h4>Week 2-3</h4>
+      <p>Clean up repo structure. Write README with side-by-side demo. VS Code TextMate grammar for syntax highlighting. pyproject.toml and pip installability. Three polished examples. GitHub release.</p>
+    </div>
+    <div class="card">
+      <div class="card-label accent">Phase 3 — Launch</div>
+      <h4>Week 3-4</h4>
+      <p>Blog post: "Why every AI agent framework is solving the wrong problem." HN submission. Share in targeted communities (Zach Rattner Slack, AI agents group, Sam Coope network). dendric.dev goes live with docs.</p>
+    </div>
+    <div class="card">
+      <div class="card-label purple">Phase 4 — Adaptive Graph</div>
+      <h4>Week 4-6</h4>
+      <p>Dynamic edge weights, subgraph pattern embeddings, neurotransmitter modulation. Upgrade <code>deja_vu</code> from v1 (vector threshold) to v2 (spreading activation with adaptive recognition). Ablation study / benchmarks.</p>
+    </div>
+    <div class="card">
+      <div class="card-label cyan">Phase 5 — Voice + Jarvis</div>
+      <h4>Week 6-8</h4>
+      <p>Wire Deepgram STT, ElevenLabs TTS, <code>stream...then...</code> temporal routing. Build personal Jarvis prototype on Drift + Dendric. Dogfood daily. Iterate primitives based on real usage.</p>
+    </div>
+    <div class="card full">
+      <div class="card-label red">Phase 6 — Production & Ecosystem</div>
+      <h4>Month 3+</h4>
+      <p>MCP tool declarations. Multi-agent composition. Pitchwits integration. Platform partnerships (Bolt/Lovable/Base44). Workshop paper submission. Local inference support (Blackwell hardware). The long game.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 14. THE BIG PICTURE ═══════════════════════ -->
+<section>
+  <div class="section-num">14 — The Thesis, Restated</div>
+  <h2>What This Is</h2>
+
+  <p>Drift + Dendric is not a framework, not a library, not a tool. It's a <strong>cognitive architecture for agents, expressed as a programming language</strong>.</p>
+
+  <p>Drift is how an agent <em>thinks</em> — intent verbs, cost-aware model routing, structured output, progressive disclosure from English-adjacent to full engineering control.</p>
+
+  <p>Dendric is how an agent <em>remembers</em> — four retrieval paths, temporal decay, spreading activation, and the <code>deja_vu</code> primitive that lets agents recognise patterns they weren't looking for.</p>
+
+  <p>The voice architecture is how an agent <em>speaks</em> — layered temporal model routing that bridges the gap between instant acknowledgment and thoughtful reasoning.</p>
+
+  <p>No other system has all three designed together from first principles. That co-design is the moat. The memory system knows about cost. The language knows about memory. The voice interface knows about both. They share assumptions, they share constraints, they share a philosophy: agents are non-deterministic, they have cost, they fail gracefully, they remember, they learn, they compose.</p>
+
+  <div class="callout green">
+    <strong>The transpiler works today.</strong> Three .drift files transpile to Python and execute end-to-end. The Dendric spec is complete with benchmarks. The voice stack uses production APIs. This isn't a whiteboard. This is buildable, and the spec you're reading is the build plan.
+  </div>
+</section>
+
+<footer>
+  drift v0.1.0 · dendric · june 2026
+</footer>
+
+</div>
+</body>
+</html>

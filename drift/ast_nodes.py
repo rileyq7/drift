@@ -66,8 +66,19 @@ class AgentDecl:
 
 @dataclass
 class MemoryConfig:
-    """memory { store: "sqlite://...", recall strategy: "semantic", ... }"""
-    store: str = "sqlite://:memory:"   # default to in-memory
+    """Memory configuration. Two forms:
+
+      memory: dendric("persona_name")
+          → backend="dendric", persona="persona_name". The codegen wires
+            this to DendricStore (with mock fallback when DATABASE_URL
+            is unset).
+
+      memory { store: "sqlite://...", recall strategy: "semantic", ... }
+          → legacy block form, backend="sqlite" (default).
+    """
+    backend: str = "sqlite"             # "sqlite" | "dendric"
+    persona: str = ""                   # only used when backend=="dendric"
+    store: str = "sqlite://:memory:"    # only used when backend=="sqlite"
     recall_strategy: str = "recent"     # "semantic" | "recent" | "relevant" | "all"
     max_recall: int = 20
     decay_enabled: bool = False
@@ -179,7 +190,18 @@ class Param:
 
 @dataclass
 class ModelConfig:
-    """Model routing configuration."""
+    """Model routing configuration.
+
+    Routing modes:
+      "default"      — single model, optionally with fallback list
+      "prefer"       — preferred model + fallback chain
+      "stream_then"  — temporal model routing: fire `stream_model` for an
+                       instant bridge response while `then_model` does the
+                       real reasoning, supersede the bridge when ready.
+                       Used by the voice stack but the language feature
+                       is provider-agnostic (works for any two models).
+    """
+    mode: str = "default"     # "default" | "prefer" | "stream_then"
     default: str = ""
     prefer: str = ""
     fallback: str = ""        # comma-allowed string OR list, normalized in parser
@@ -187,6 +209,8 @@ class ModelConfig:
     never: str = ""
     never_list: list = field(default_factory=list)
     upgrades: list = field(default_factory=list)  # list of ModelUpgrade
+    stream_model: str = ""    # fast bridge model
+    then_model: str = ""      # slow reasoning model
 
 
 @dataclass
@@ -305,6 +329,38 @@ class MatchArm:
     pattern: 'Expression' = None  # StringLit or Ident for "any other"
     body: list = field(default_factory=list)
     is_default: bool = False
+
+
+@dataclass
+class DejaVuStmt:
+    """deja_vu match on <context_expr> { "pattern_name" -> { body } ... }
+
+    Semantically: pass context_expr to memory.deja_vu_check(); when the
+    archive trigger fires, dispatch to the matching arm. The match's
+    pattern_type is compared substring-wise against each arm's pattern
+    string (v1 classification — see DendricStore.DejaVuMatch.matches)."""
+    context_expr: 'Expression' = None
+    arms: list = field(default_factory=list)  # list of DejaVuArm
+
+
+@dataclass
+class DejaVuArm:
+    pattern: str = ""
+    body: list = field(default_factory=list)
+    is_default: bool = False
+
+
+@dataclass
+class ForgetStmt:
+    """forget memories tagged X / older than Nd / where temp < X
+
+    `mode` is one of: "by_tag" (tag expr), "by_age" (older_than_days int),
+    "by_temp" (below_temp float). All three route to the adapter's
+    forget() method — see DendricStore.forget."""
+    mode: str = "by_temp"
+    tag: 'Expression' = None
+    older_than_days: int = 0
+    below_temp: float = 0.0
 
 
 @dataclass
@@ -463,4 +519,4 @@ Expression = (IntentExpr | FnCall | FieldAccess | BinOp | Ident |
               BoolLit | ListLit | SchemaConstructor | PipeExpr | UnaryOp)
 
 Statement = (LetStmt | ReturnStmt | RespondStmt | IfStmt |
-             ForEachStmt | MatchStmt | ExprStmt)
+             ForEachStmt | MatchStmt | DejaVuStmt | ForgetStmt | ExprStmt)
