@@ -1,26 +1,35 @@
 # Drift
 
+[![PyPI](https://img.shields.io/pypi/v/drift-lang.svg)](https://pypi.org/project/drift-lang/)
+[![Python](https://img.shields.io/pypi/pyversions/drift-lang.svg)](https://pypi.org/project/drift-lang/)
+[![VS Code](https://img.shields.io/visual-studio-marketplace/v/rileyq7.drift-lang?label=VS%20Code&color=blue)](https://marketplace.visualstudio.com/items?itemName=rileyq7.drift-lang)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+[![Tests](https://img.shields.io/badge/tests-350%20passing-success.svg)](#)
+
 **An intent-based language for agentic systems.** Write your agent in English-shaped blocks, run it as async Python.
 
 ```drift
-agent GrantChecker {
-  model: "claude-haiku"
+agent InboxTriage {
+  model: "gpt-5.4-nano"
   budget: $0.10 per run
 
-  step assess(application: string) -> Decision {
-    let summary = summarize the application as string
-    let score = score eligibility from 1 to 10 as int
-
-    if confident<score> {
-      return Decision { approved: score > 7, summary: summary }
-    } else {
-      escalate to human review
+  step triage(emails: list<string>) -> list<EmailAnalysis> {
+    let analyses = []
+    for each email in emails parallel {
+      let analysis = classify email as EmailAnalysis
+      analyses.add(analysis)
     }
+    for each a in analyses {
+      if a.priority == "urgent" {
+        respond "URGENT — {a.subject}: {a.summary}"
+      }
+    }
+    return analyses
   }
 }
 ```
 
-That's a full agent — model choice, budget, an intent verb (`summarize`), confidence-gated branching, structured return. The transpiler turns it into async Python that runs on Drift's thin runtime.
+A full agent — model choice, budget, parallel fan-out, structured classification, conditional output. The transpiler emits async Python that runs on Drift's thin runtime. Live against OpenAI: 5 emails, 1.82s, $0.0092, returned 5 typed dataclasses.
 
 ## Install
 
@@ -92,7 +101,7 @@ See [`examples/`](./examples) for working `.drift` programs and their generated 
 
 ## Status
 
-Alpha — language surface is stable, runtime works, 344/344 tests passing. Voice primitives parse but adapters aren't wired yet. Type system beyond `confident<T>` is on the roadmap.
+Alpha — language surface is stable, runtime works, 350/350 tests passing. OpenAI + Anthropic providers with strict-JSON output, MCP tools, Dendric memory, source-mapped runtime errors. Voice primitives parse but adapters aren't wired yet. Type system beyond `confident<T>` is on the roadmap.
 
 ## License
 
