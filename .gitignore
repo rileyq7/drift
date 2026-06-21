@@ -44,3 +44,8 @@ checkpoints/
 
 # Logs
 *.log
+
+# VS Code extension build artifacts
+*.vsix
+vscode-drift/node_modules/
+

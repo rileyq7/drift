@@ -35,7 +35,9 @@ class ParseError(Exception):
 
 class Parser:
     def __init__(self, tokens: list[Token]):
-        self.tokens = tokens
+        # Comments are preserved by the lexer for tooling (drift fmt) but
+        # ignored during parsing. Filter them out here.
+        self.tokens = [t for t in tokens if t.type != TT.COMMENT]
         self.pos = 0
         # Custom verbs declared via `define verb` are added here as we go.
         # A verb must be declared before its first use at a call site.

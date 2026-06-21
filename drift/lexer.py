@@ -51,6 +51,7 @@ class TT(Enum):
     NEQ = auto()           # !=
 
     NEWLINE = auto()
+    COMMENT = auto()       # -- line  or  {- block -}
     EOF = auto()
 
 
@@ -138,12 +139,19 @@ def lex(source: str) -> list[Token]:
 
         # --- Comments: -- to end of line ---
         if ch == '-' and i + 1 < length and source[i + 1] == '-':
+            start = i
+            start_col = col
             while i < length and source[i] != '\n':
                 i += 1
+            tokens.append(Token(TT.COMMENT, source[start:i], line, start_col))
+            col = start_col + (i - start)
             continue
 
         # --- Block comments: {- ... -} ---
         if ch == '{' and i + 1 < length and source[i + 1] == '-':
+            start = i
+            start_line = line
+            start_col = col
             i += 2
             col += 2
             depth = 1
@@ -163,6 +171,7 @@ def lex(source: str) -> list[Token]:
                 else:
                     i += 1
                     col += 1
+            tokens.append(Token(TT.COMMENT, source[start:i], start_line, start_col))
             continue
 
         # --- Strings: "..." with {expr} interpolation ---

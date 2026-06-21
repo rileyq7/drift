@@ -75,21 +75,26 @@ class TestStrings:
 
 
 class TestComments:
-    def test_line_comment_ignored(self):
-        toks = types_of("-- comment\nagent X {}")
-        # No comment token expected
-        assert TT.IDENT in toks
-        assert "comment" not in values_of("-- comment\nagent X {}")
+    def test_line_comment_emitted(self):
+        toks = lex("-- comment\nagent X {}")
+        # Comment is emitted as a TT.COMMENT token (preserved for tooling).
+        assert any(t.type == TT.COMMENT and t.value == "-- comment" for t in toks)
+        # Parsing still works because the parser filters comments out.
+        assert TT.IDENT in {t.type for t in toks}
 
-    def test_block_comment_ignored(self):
-        toks = values_of("{- multi\nline\ncomment -}agent")
-        assert "comment" not in toks
-        assert "agent" in toks
+    def test_block_comment_emitted(self):
+        toks = lex("{- multi\nline\ncomment -}agent")
+        comments = [t for t in toks if t.type == TT.COMMENT]
+        assert len(comments) == 1
+        assert "multi" in comments[0].value
+        assert any(t.type == TT.IDENT and t.value == "agent" for t in toks)
 
     def test_nested_block_comment(self):
-        # {- outer {- inner -} outer -}
-        toks = values_of("{- a {- b -} c -}agent")
-        assert toks == ["agent"]
+        toks = lex("{- a {- b -} c -}agent")
+        comments = [t for t in toks if t.type == TT.COMMENT]
+        assert len(comments) == 1
+        assert comments[0].value == "{- a {- b -} c -}"
+        assert any(t.type == TT.IDENT and t.value == "agent" for t in toks)
 
 
 class TestIdentifiers:

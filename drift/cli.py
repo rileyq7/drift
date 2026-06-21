@@ -15,14 +15,58 @@ Usage:
 import sys
 import os
 import json
+import time
 import asyncio
 import argparse
 import importlib.util
 from pathlib import Path
 
+from drift import __version__
 from drift.lexer import lex, LexError
 from drift.parser import Parser, ParseError
 from drift.codegen import CodeGenerator
+from drift.formatter import format_source
+
+
+# ─── .env auto-loading ──────────────────────────────────────────────────
+
+def _load_env(start: Path) -> int:
+    """Walk up from `start` looking for .env. Load matching lines into os.environ.
+    Returns the number of variables set (skipping ones already in the environment).
+    """
+    p = start.resolve()
+    for parent in [p.parent, *p.parents]:
+        env_path = parent / ".env"
+        if env_path.is_file():
+            return _apply_env_file(env_path)
+        # stop at filesystem root
+        if parent == parent.parent:
+            break
+    return 0
+
+
+def _apply_env_file(env_path: Path) -> int:
+    n = 0
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value
+        n += 1
+    return n
+
+
+def _provider_name() -> str:
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    return "mock"
 
 
 # ─── Source-aware error formatting ──────────────────────────────────────
@@ -146,6 +190,35 @@ def _print_ast(node, indent=0):
         print(f"{prefix}{node!r}")
 
 
+def cmd_fmt(args):
+    """Rewrite a .drift file with canonical formatting."""
+    source = read_source(args.file)
+    try:
+        formatted = format_source(source)
+    except LexError as e:
+        _print_lex_error(args.file, source, e)
+        sys.exit(1)
+
+    if args.check:
+        if source == formatted:
+            print(f"  ✓ {args.file} — already formatted")
+            return
+        sys.stderr.write(f"  ✗ {args.file} — not formatted (run `drift fmt {args.file}`)\n")
+        sys.exit(1)
+
+    if args.stdout:
+        sys.stdout.write(formatted)
+        return
+
+    if source == formatted:
+        print(f"  ✓ {args.file} — unchanged")
+        return
+
+    with open(args.file, 'w') as f:
+        f.write(formatted)
+    print(f"  ✓ formatted {args.file}")
+
+
 def cmd_check(args):
     """Validate syntax without running or emitting Python."""
     source = read_source(args.file)
@@ -188,7 +261,8 @@ def cmd_transpile(args):
         sys.exit(1)
 
 
-def cmd_run(args):
+def _run_once(args):
+    """Transpile + execute a single time. Returns 0 on success, nonzero on failure."""
     source = read_source(args.file)
     try:
         tokens = lex(source)
@@ -206,6 +280,8 @@ def cmd_run(args):
             f.write(python_source)
         print(f"  ✓ Transpiled → {py_path}")
 
+        # Force a re-import each watch iteration.
+        sys.modules.pop('drift_generated', None)
         spec = importlib.util.spec_from_file_location("drift_generated", py_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules['drift_generated'] = module
@@ -220,7 +296,7 @@ def cmd_run(args):
 
         if not agents:
             sys.stderr.write("\n  ✗ No agents found in the generated code.\n\n")
-            sys.exit(1)
+            return 1
 
         if args.agent:
             agent_cls = agents.get(args.agent)
@@ -228,7 +304,7 @@ def cmd_run(args):
                 sys.stderr.write(
                     f"\n  ✗ Agent '{args.agent}' not found. Available: {', '.join(agents.keys())}\n\n"
                 )
-                sys.exit(1)
+                return 1
         else:
             agent_cls = list(agents.values())[0]
 
@@ -237,16 +313,51 @@ def cmd_run(args):
             inputs = json.loads(args.input)
 
         asyncio.run(run_agent(agent_cls, step_name=args.step, inputs=inputs))
+        return 0
 
     except LexError as e:
         _print_lex_error(args.file, source, e)
-        sys.exit(1)
+        return 1
     except ParseError as e:
         _print_parse_error(args.file, source, e)
-        sys.exit(1)
+        return 1
     except Exception as e:
         _print_runtime_error(args.file, e, show_trace=args.trace)
-        sys.exit(1)
+        return 1
+
+
+def cmd_run(args):
+    # Load .env from the .drift file's directory tree.
+    n_loaded = _load_env(Path(args.file))
+    provider = _provider_name()
+    banner = f"  ▸ provider: {provider}"
+    if n_loaded:
+        banner += f"  ·  loaded {n_loaded} var{'s' if n_loaded != 1 else ''} from .env"
+    print(banner)
+
+    if not args.watch:
+        rc = _run_once(args)
+        sys.exit(rc)
+
+    # Watch mode: poll mtime, re-run on change.
+    path = Path(args.file)
+    last_mtime = 0.0
+    print(f"  ▸ watching {args.file} — Ctrl-C to exit")
+    try:
+        while True:
+            try:
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                time.sleep(0.5)
+                continue
+            if mtime != last_mtime:
+                last_mtime = mtime
+                print("\n" + "─" * 50)
+                _run_once(args)
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n  ▸ stopped")
+        sys.exit(0)
 
 
 def cmd_new(args):
@@ -289,6 +400,7 @@ def main():
         prog='drift',
         description='Drift — An intent-based language for agentic systems',
     )
+    parser.add_argument('--version', action='version', version=f'drift {__version__}')
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     p_new = subparsers.add_parser('new', help='Scaffold a new starter project')
@@ -301,11 +413,18 @@ def main():
     p_run.add_argument('--agent', help='Specific agent to run')
     p_run.add_argument('--input', help='JSON input string')
     p_run.add_argument('--trace', action='store_true', help='Show full Python traceback on runtime errors')
+    p_run.add_argument('--watch', action='store_true', help='Re-run when the .drift file changes')
     p_run.set_defaults(func=cmd_run)
 
     p_check = subparsers.add_parser('check', help='Validate syntax without running')
     p_check.add_argument('file', help='Path to .drift file')
     p_check.set_defaults(func=cmd_check)
+
+    p_fmt = subparsers.add_parser('fmt', help='Format a .drift file in place')
+    p_fmt.add_argument('file', help='Path to .drift file')
+    p_fmt.add_argument('--check', action='store_true', help='Exit 1 if file is not formatted (CI mode)')
+    p_fmt.add_argument('--stdout', action='store_true', help='Write to stdout instead of rewriting the file')
+    p_fmt.set_defaults(func=cmd_fmt)
 
     p_trans = subparsers.add_parser('transpile', help='Transpile .drift to Python')
     p_trans.add_argument('file', help='Path to .drift file')
