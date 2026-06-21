@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""
+Drift CLI — Transpile and run .drift files.
+
+Usage:
+    drift new <name>                  # Scaffold a new starter project
+    drift run <file.drift>            # Transpile + execute
+    drift check <file.drift>          # Validate syntax without running
+    drift transpile <file.drift>      # Output Python to stdout
+    drift transpile <file> -o out.py  # Write Python to file
+    drift lex <file.drift>            # Show token stream (debug)
+    drift parse <file.drift>          # Show AST (debug)
+"""
+
+import sys
+import os
+import json
+import asyncio
+import argparse
+import importlib.util
+from pathlib import Path
+
+from drift.lexer import lex, LexError
+from drift.parser import Parser, ParseError
+from drift.codegen import CodeGenerator
+
+
+# ─── Source-aware error formatting ──────────────────────────────────────
+
+def _format_source_error(file: str, source: str, line: int, col: int, message: str, kind: str) -> str:
+    """Render a friendly compile error with line + caret."""
+    lines = source.splitlines()
+    src_line = lines[line - 1] if 1 <= line <= len(lines) else ""
+    gutter = f" {line} | "
+    pad = " " * (len(gutter) - 3) + "| "
+    caret = " " * max(col - 1, 0) + "^"
+    return (
+        f"\n  {kind} error: {message}\n"
+        f"    → {file}:{line}:{col}\n\n"
+        f"{gutter}{src_line}\n"
+        f"{pad}{caret}\n"
+    )
+
+
+def _print_lex_error(file: str, source: str, e: LexError):
+    sys.stderr.write(_format_source_error(file, source, e.line, e.col, str(e).split(": ", 1)[-1], "Lex"))
+
+
+def _print_parse_error(file: str, source: str, e: ParseError):
+    tok = e.token
+    msg = str(e).split(": ", 1)[-1]
+    sys.stderr.write(_format_source_error(file, source, tok.line, tok.col, msg, "Parse"))
+
+
+def read_source(path: str) -> str:
+    if not os.path.exists(path):
+        sys.stderr.write(f"\n  ✗ File not found: {path}\n\n")
+        sys.exit(1)
+    with open(path, 'r') as f:
+        return f.read()
+
+
+# ─── Commands ───────────────────────────────────────────────────────────
+
+def cmd_lex(args):
+    source = read_source(args.file)
+    try:
+        tokens = lex(source)
+        for tok in tokens:
+            print(tok)
+    except LexError as e:
+        _print_lex_error(args.file, source, e)
+        sys.exit(1)
+
+
+def cmd_parse(args):
+    source = read_source(args.file)
+    try:
+        tokens = lex(source)
+        parser = Parser(tokens)
+        program = parser.parse()
+        _print_ast(program, indent=0)
+    except LexError as e:
+        _print_lex_error(args.file, source, e)
+        sys.exit(1)
+    except ParseError as e:
+        _print_parse_error(args.file, source, e)
+        sys.exit(1)
+
+
+def _print_ast(node, indent=0):
+    prefix = "  " * indent
+    if isinstance(node, list):
+        for item in node:
+            _print_ast(item, indent)
+        return
+
+    name = type(node).__name__
+    if hasattr(node, '__dataclass_fields__'):
+        print(f"{prefix}{name}:")
+        for field_name, field_obj in node.__dataclass_fields__.items():
+            val = getattr(node, field_name)
+            if isinstance(val, list) and val:
+                print(f"{prefix}  {field_name}:")
+                for item in val:
+                    _print_ast(item, indent + 2)
+            elif hasattr(val, '__dataclass_fields__'):
+                print(f"{prefix}  {field_name}:")
+                _print_ast(val, indent + 2)
+            elif isinstance(val, dict) and val:
+                print(f"{prefix}  {field_name}:")
+                for k, v in val.items():
+                    if hasattr(v, '__dataclass_fields__'):
+                        print(f"{prefix}    {k}:")
+                        _print_ast(v, indent + 3)
+                    else:
+                        print(f"{prefix}    {k}: {v!r}")
+            elif val:
+                print(f"{prefix}  {field_name}: {val!r}")
+    else:
+        print(f"{prefix}{node!r}")
+
+
+def cmd_check(args):
+    """Validate syntax without running or emitting Python."""
+    source = read_source(args.file)
+    try:
+        tokens = lex(source)
+        parser = Parser(tokens)
+        parser.parse()
+    except LexError as e:
+        _print_lex_error(args.file, source, e)
+        sys.exit(1)
+    except ParseError as e:
+        _print_parse_error(args.file, source, e)
+        sys.exit(1)
+    print(f"  ✓ {args.file} — syntax OK")
+
+
+def cmd_transpile(args):
+    source = read_source(args.file)
+    try:
+        tokens = lex(source)
+        parser = Parser(tokens)
+        program = parser.parse()
+        codegen = CodeGenerator()
+        python_source = codegen.generate(program)
+        python_source = python_source.replace(
+            "Source: <drift_file>",
+            f"Source: {args.file}"
+        )
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(python_source)
+            print(f"  ✓ Transpiled {args.file} → {args.output}")
+        else:
+            print(python_source)
+    except LexError as e:
+        _print_lex_error(args.file, source, e)
+        sys.exit(1)
+    except ParseError as e:
+        _print_parse_error(args.file, source, e)
+        sys.exit(1)
+
+
+def cmd_run(args):
+    source = read_source(args.file)
+    try:
+        tokens = lex(source)
+        parser = Parser(tokens)
+        program = parser.parse()
+        codegen = CodeGenerator()
+        python_source = codegen.generate(program)
+        python_source = python_source.replace(
+            "Source: <drift_file>",
+            f"Source: {args.file}"
+        )
+
+        py_path = Path(args.file).with_suffix('.py')
+        with open(py_path, 'w') as f:
+            f.write(python_source)
+        print(f"  ✓ Transpiled → {py_path}")
+
+        spec = importlib.util.spec_from_file_location("drift_generated", py_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['drift_generated'] = module
+        spec.loader.exec_module(module)
+
+        from drift.runtime.core import Agent, run_agent
+        agents = {}
+        for name in dir(module):
+            obj = getattr(module, name)
+            if isinstance(obj, type) and issubclass(obj, Agent) and obj is not Agent:
+                agents[name] = obj
+
+        if not agents:
+            sys.stderr.write("\n  ✗ No agents found in the generated code.\n\n")
+            sys.exit(1)
+
+        if args.agent:
+            agent_cls = agents.get(args.agent)
+            if not agent_cls:
+                sys.stderr.write(
+                    f"\n  ✗ Agent '{args.agent}' not found. Available: {', '.join(agents.keys())}\n\n"
+                )
+                sys.exit(1)
+        else:
+            agent_cls = list(agents.values())[0]
+
+        inputs = {}
+        if args.input:
+            inputs = json.loads(args.input)
+
+        asyncio.run(run_agent(agent_cls, step_name=args.step, inputs=inputs))
+
+    except LexError as e:
+        _print_lex_error(args.file, source, e)
+        sys.exit(1)
+    except ParseError as e:
+        _print_parse_error(args.file, source, e)
+        sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f"\n  ✗ Runtime error: {e}\n\n")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def cmd_new(args):
+    """Scaffold a new starter project."""
+    name = args.name
+    if not name.replace("_", "").replace("-", "").isalnum():
+        sys.stderr.write(f"\n  ✗ Invalid name: '{name}' — use letters, digits, _ or -.\n\n")
+        sys.exit(1)
+
+    target_dir = Path(name)
+    if target_dir.exists() and any(target_dir.iterdir()):
+        sys.stderr.write(f"\n  ✗ Directory '{name}' already exists and is not empty.\n\n")
+        sys.exit(1)
+    target_dir.mkdir(exist_ok=True)
+
+    pascal = "".join(p.capitalize() for p in name.replace("-", "_").split("_"))
+
+    tpl_dir = Path(__file__).parent / "templates"
+    starter_src = (tpl_dir / "starter.drift").read_text()
+    env_src = (tpl_dir / "env.example").read_text()
+
+    drift_file = target_dir / f"{name}.drift"
+    drift_file.write_text(starter_src.format(name=name, Name=pascal))
+    (target_dir / ".env.example").write_text(env_src)
+
+    print(f"  ✓ Created {drift_file}")
+    print(f"  ✓ Created {target_dir / '.env.example'}")
+    print()
+    print("  Next steps:")
+    print(f"    cd {name}")
+    print(f"    drift run {name}.drift --input '{{\"name\":\"Riley\"}}'")
+    print()
+    print("  (No API key set? Drift uses a mock provider and still runs.)")
+
+
+# ─── Entrypoint ─────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='drift',
+        description='Drift — An intent-based language for agentic systems',
+    )
+    subparsers = parser.add_subparsers(dest='command', required=True)
+
+    p_new = subparsers.add_parser('new', help='Scaffold a new starter project')
+    p_new.add_argument('name', help='Project name (creates a directory of this name)')
+    p_new.set_defaults(func=cmd_new)
+
+    p_run = subparsers.add_parser('run', help='Transpile and execute a .drift file')
+    p_run.add_argument('file', help='Path to .drift file')
+    p_run.add_argument('--step', help='Specific step to run')
+    p_run.add_argument('--agent', help='Specific agent to run')
+    p_run.add_argument('--input', help='JSON input string')
+    p_run.set_defaults(func=cmd_run)
+
+    p_check = subparsers.add_parser('check', help='Validate syntax without running')
+    p_check.add_argument('file', help='Path to .drift file')
+    p_check.set_defaults(func=cmd_check)
+
+    p_trans = subparsers.add_parser('transpile', help='Transpile .drift to Python')
+    p_trans.add_argument('file', help='Path to .drift file')
+    p_trans.add_argument('-o', '--output', help='Output .py file path')
+    p_trans.set_defaults(func=cmd_transpile)
+
+    p_lex = subparsers.add_parser('lex', help='Show token stream (debug)')
+    p_lex.add_argument('file', help='Path to .drift file')
+    p_lex.set_defaults(func=cmd_lex)
+
+    p_parse = subparsers.add_parser('parse', help='Show AST (debug)')
+    p_parse.add_argument('file', help='Path to .drift file')
+    p_parse.set_defaults(func=cmd_parse)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()
