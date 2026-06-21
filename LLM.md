@@ -43,7 +43,7 @@ Comments may appear anywhere whitespace can. The lexer preserves them; `drift fm
 |---|---|---|
 | String | `"hello"` (supports `"{var}"` interpolation) | string |
 | Number | `42`, `3.14` | number |
-| Currency | `$0.10`, `£5`, `€20`, `¥100` | budget literal |
+| Currency | `$0.10`, `$0.05`, `$1.50`, `£5`, `€20`, `¥100` | budget literal |
 | Duration | `30s`, `5m`, `1h`, `2d`, `100ms` | duration literal |
 | Bool | `true`, `false` | bool |
 | List | `[a, b, c]` | list |
@@ -180,6 +180,14 @@ budget: £5 per run
 
 Hard ceiling. Exceeding raises `BudgetExceeded` and stops the agent.
 
+### 8.2.1 `quality` (optional)
+
+```drift
+quality: 0.85 minimum confidence
+```
+
+Overrides the default `min_confidence` threshold (0.85) used by `is confident` tests. The trailing `minimum confidence` is optional sugar; `quality: 0.85` works too.
+
 ### 8.3 `state`
 
 ```drift
@@ -247,8 +255,10 @@ Returns the value. Must match the step's declared return type.
 ### `respond`
 ```drift
 respond "Message with {var} interpolation"
+respond "Member access works too: {result.summary}"
+respond "Including arithmetic: {score * 100}"
 ```
-Prints to the user-visible output. Multiple `respond`s accumulate; they're shown in order.
+Prints to the user-visible output. The braces interpolate any expression in scope — bare variables, member access (`result.summary`), method calls (`name.upper()`), arithmetic. Multiple `respond`s accumulate; they're shown in order.
 
 ### `if` / `otherwise` / `otherwise if`
 ```drift
@@ -276,21 +286,27 @@ for each email in emails parallel {
 }
 ```
 
-### `attempt` / `recover`
+### `attempt` / `recover from`
 ```drift
 attempt {
   <statements>
-} recover on failure in <step_name> {
-  retry
-} recover on budget exceeded {
-  fail "out of money"
+} recover from {
+  BudgetExceeded -> { fail "out of money" }
+  RateLimited    -> retry
+  any error      -> { respond "something went wrong" }
 }
 ```
-Recover arms:
-- `on failure in <step_name>` — catches errors from a specific step
-- `on budget exceeded` — catches `BudgetExceeded`
-- `on rate limited` — catches `RateLimited`
-- `on auth error` — catches `AuthError`
+Each arm is `<ErrorType> -> <body>` (or `any error -> <body>` for the catch-all). The body is either a single statement or a `{ ... }` block.
+
+Error types (PascalCase, matched against runtime exception classes):
+- `BudgetExceeded`
+- `RateLimited`
+- `AuthError`
+- `StepFailed`
+- `SchemaViolation`
+- `ModelUnavailable`
+- `DriftError` (base class — catches everything below it)
+- `any error` — catch-all default arm
 
 Inside a recover arm:
 - `retry` — restart the attempt block
@@ -329,6 +345,16 @@ An intent expression starts with a verb and is composed with clause keywords. It
 
 Verbs: `classify`, `extract`, `summarize`, `rate`, `generate`, `rewrite`, `answer`, `compare`, `decide`, `translate`, `match`, plus any verbs you declared with `define verb`.
 
+**Picking the right verb when the output is a schema.** Every verb can produce structured output via `as <Schema>` — the verb mostly biases the LLM's framing:
+- `classify` — assigns categories to input; pick when the result has discrete labels (priority, sentiment, type).
+- `extract` — pulls specific fields out of text; pick when the input is unstructured and the schema's fields name things to find.
+- `rate` / `score` — assigns numeric scores along axes; pick when the schema is numeric-heavy.
+- `summarize` — condenses text; pick when the result is mostly prose.
+- `generate` — produces new content; pick when nothing in the input maps directly to the output.
+- `answer` — Q&A over a context (`from <docs>`); pick when there's a question + a source.
+
+When in doubt for "produce a full structured analysis from a single text input", `classify` and `extract` both work — they only differ in how the prompt is framed.
+
 Clause keywords: `as`, `from`, `in`, `against`, `to`, `using`, `considering`, `with`.
 
 Examples:
@@ -349,17 +375,12 @@ let scored = rate company against criteria as confident<FitScore>
 if scored is confident {
   return scored.value
 } otherwise {
-  escalate to human review
+  fail "low confidence — needs human review"
 }
 ```
-`is confident` tests `result.confidence >= agent.min_confidence` (default 0.85). `scored.value` is the unwrapped `FitScore`.
+`is confident` tests `result.confidence >= agent.min_confidence` (default 0.85, override with `quality:`). `scored.value` is the unwrapped result.
 
-### `escalate`
-```drift
-escalate to human review
-escalate to "supervisor agent"
-```
-Stops execution and yields a `HumanReviewRequired` result. Used inside confidence-gated branches.
+There is no `escalate` keyword. To exit a step early on low confidence, use `fail "<message>"` (raises `StepFailed`) or `return` a sentinel value declared in the schema.
 
 ---
 
@@ -411,10 +432,10 @@ HTTP methods: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`. Path uses `{param
 
 ## 12. `pipeline` declaration
 
-Compose steps and agent calls into a directed graph.
+Compose steps and agent calls into a directed graph. **Pipeline names must be PascalCase** (`Triage`, not `triage`).
 
 ```drift
-pipeline triage {
+pipeline Triage {
   input_email -> Classifier.tag -> Router.route => Action.execute
   Classifier.tag ~> Logger.log
   Action.execute |> Notifier.send
@@ -435,12 +456,19 @@ Each node is a step name (current file's first agent) or `Agent.step` (any agent
 
 ```drift
 define verb evaluate {
-  default output: FitScore
-  clauses: against, considering, with
+  pattern: "evaluate {target} against {criteria}"
   prompt: "Evaluate the given input thoroughly."
+  output: FitScore
+  temperature: 0.2
 }
 ```
-Once declared, `evaluate` works like any built-in intent verb. The `default output` schema applies when the call site omits `as`. `prompt` is the system prompt for the LLM call.
+Fields (all optional except where logic requires them):
+- `pattern` — the call-site shape, used by the parser to validate verb invocations.
+- `prompt` — the system prompt sent to the LLM.
+- `output` — the default output type when the call site omits `as`.
+- `temperature` — sampling temperature for this verb's LLM call.
+
+Once declared, `evaluate` works like any built-in intent verb. Custom verbs use the same clause keywords (`as`, `from`, `against`, etc.).
 
 ---
 
@@ -456,19 +484,26 @@ Pulls named declarations into the current file. Path is relative to the importin
 
 ## 15. Standard library imports
 
-Drift ships modules you can import at the top of any file:
+Drift ships modules you can import at the top of any file. The actual function names:
 
 ```drift
-import { read_file, write_file } from "io"
-import { send_email, send_slack } from "notify"
-import { check_pii, redact } from "safety"
-import { parse_json, format_json } from "data"
-import { now, sleep, parse_duration } from "time"
-import { tokenize, normalize, distance } from "text"
-import { log_event, trace } from "observe"
+import { read, write, fetch_url, load_pdf, load_csv } from "io"
+import { email, slack, webhook, push } from "notify"
+import { redact_pii, check_content, sanitize, rate_limit } from "safety"
+import { filter_, sort, group_by, deduplicate, paginate } from "data"
+import { now, wait, deadline, schedule } from "time"
+import { chunk, tokenize, similarity, embed } from "text"
+import { log, trace, metric, cost_report } from "observe"
 ```
 
-Use any imported function as a normal call inside step bodies.
+Use any imported function as a normal call inside step bodies. Examples:
+- `notify.email(to: "x@y.com", subject: "...", body: "...")`
+- `time.wait(2.0)` — async, awaitable
+- `safety.redact_pii(user_message)`
+- `io.fetch_url("https://...")` — async
+- `text.chunk(long_doc, max_chars: 2000)`
+
+Stubs vs real: some functions (notify.email, observe.metric) are v0.2 stubs that log to stdout instead of doing the real thing. Treat them as wired but no-op until production needs them.
 
 ---
 
@@ -501,15 +536,40 @@ Handle them with `attempt`/`recover`.
 ## 17. Quick patterns
 
 ### Confidence-gated branching
+
+Two equally valid forms.
+
+**A. `confident<T>` wrapper (preferred when you want a typed `.value`):**
 ```drift
+schema Decision { approved: bool, reasoning: string }
+
 step assess(input: string) -> Decision {
   let scored = rate input against rubric as confident<Decision>
   if scored is confident {
     return scored.value
   }
-  escalate to human review
+  fail "low confidence — escalate"
 }
 ```
+
+**B. Plain schema with explicit confidence field:**
+```drift
+schema Decision {
+  approved: bool
+  reasoning: string
+  confidence: number between 0 and 1
+}
+
+step assess(input: string) -> Decision {
+  let result = rate input against rubric as Decision
+  if result.confidence < 0.7 {
+    fail "low confidence — escalate"
+  }
+  return result
+}
+```
+
+Both work. Pick `confident<T>` when you want the agent's `min_confidence` (or `quality:`) threshold to control the gate; pick form B when you want to gate at an arbitrary per-step threshold.
 
 ### Parallel triage
 ```drift
@@ -529,10 +589,9 @@ step fetch_and_score() -> FitScore {
   attempt {
     let data = api.get_company()
     return rate data against criteria as FitScore
-  } recover on rate limited {
-    retry
-  } recover on budget exceeded {
-    fail "ran out of budget — try a cheaper model"
+  } recover from {
+    RateLimited    -> retry
+    BudgetExceeded -> fail "ran out of budget — try a cheaper model"
   }
 }
 ```
@@ -571,6 +630,7 @@ agent FileReader {
 ## 18. Anti-patterns — DON'T do these
 
 - **Don't invent verbs.** If you need a verb not in section 9, declare it with `define verb` first.
+- **Don't use `escalate`.** It doesn't exist. Use `fail "<message>"` or return a schema with a confidence field and gate on it.
 - **Don't use `else`.** Drift uses `otherwise` and `otherwise if`.
 - **Don't put spaces inside generic types.** `list<string>` not `list< string >`. The formatter normalizes this but parsing accepts both.
 - **Don't put space between function name and `(`.** `step greet(name: string)` not `step greet (name: string)`.
@@ -578,8 +638,9 @@ agent FileReader {
 - **Don't use Python-style boolean operators.** Use `and`, `or`, `not` (lowercase).
 - **Don't try to import from arbitrary URLs.** `import` only accepts relative paths.
 - **Don't mix `memory:` shorthand and `memory {}` block.** Pick one form per agent.
-- **Don't use `confident<T>` with non-intent expressions.** Only intent verbs produce confidence — `let x = confident<int> = 5` is invalid.
 - **Don't expect `state` to persist between runs.** It's per-run scratch. Use `memory:` for cross-run persistence.
+- **Don't write `recover on X`.** It's `recover from { X -> body }`.
+- **Don't use snake_case for pipeline names.** Pipeline names must be PascalCase.
 
 ---
 

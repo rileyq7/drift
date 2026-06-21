@@ -139,14 +139,17 @@ Compiles to `asyncio.gather`. Order of results matches input order.
 attempt {
   let data = api.get_company()
   return rate data against criteria as FitScore
-} recover on rate limited {
-  retry
-} recover on budget exceeded {
-  fail "ran out of budget"
+} recover from {
+  RateLimited    -> retry
+  BudgetExceeded -> fail "ran out of budget"
+  any error      -> {
+    respond "fallback path"
+    return default_score
+  }
 }
 ```
 
-Recover arms: `on failure in <step>`, `on budget exceeded`, `on rate limited`, `on auth error`. Inside an arm: `retry`, `fail "<msg>"`, or any normal statements as fallback logic.
+Each arm is `<ErrorType> -> <body>` (or `any error -> <body>` for the catch-all). Error types are PascalCase and match runtime exception classes: `BudgetExceeded`, `RateLimited`, `AuthError`, `StepFailed`, `SchemaViolation`, `ModelUnavailable`, `DriftError`. Body is a single statement or `{ ... }`. Inside an arm: `retry`, `fail "<msg>"`, or any normal statements.
 
 ## Cross-agent calls
 
@@ -179,10 +182,10 @@ tool github {
 
 ## Pipelines
 
-For non-trivial multi-step flows, pipelines are clearer than nested steps:
+For non-trivial multi-step flows, pipelines are clearer than nested steps. Pipeline names are PascalCase.
 
 ```drift
-pipeline triage {
+pipeline Triage {
   input -> Classifier.tag -> Router.route => Action.execute
   Classifier.tag ~> Logger.log
 }

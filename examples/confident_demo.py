@@ -44,7 +44,7 @@ class Triager(Agent):
         # Budget pre-check
         self.cost_tracker.pre_check()
 
-        result = await self.intent(verb="classify", input_data=item, output_schema=Confident)
+        result = await self.intent(verb="classify", input_data=item, output_schema=Confident[str])
         if (result.is_confident(self.min_confidence)):
             self.output(f"Auto-processed: {result.value} (confidence {result.confidence})")
             _result = result.value
@@ -55,3 +55,4 @@ class Triager(Agent):
             _result = "needs_review"
             self.checkpoint.save('triage', _result)
             return _result
+

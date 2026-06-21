@@ -466,9 +466,12 @@ class CodeGenerator:
             return f"dict[{k}, {v}]"
 
         if isinstance(type_expr, ast.ConfidentType):
-            # The inner type is documentation; the runtime stores Any.
-            # Codegen emits the bare runtime class so isinstance checks work
-            # and `.value`/`.confidence` attribute access compiles cleanly.
+            # Thread the inner type through so the runtime can build a
+            # schema-aware prompt and parse `value` into a real dataclass.
+            # Falls back to bare Confident for `confident<>` with no inner.
+            if type_expr.inner_type is not None:
+                inner = self.gen_type(type_expr.inner_type)
+                return f"Confident[{inner}]"
             return "Confident"
 
         if isinstance(type_expr, ast.EnumType):

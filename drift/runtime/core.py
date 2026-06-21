@@ -116,10 +116,28 @@ class Confident:
 
     @classmethod
     def __class_getitem__(cls, item):
-        # Make Confident[T] work as a type annotation. The element type is
-        # only documentation at runtime — validation happens via the wrapped
-        # value's schema (if any).
-        return cls
+        # Confident[T] returns a tagged subclass so the runtime can recover
+        # the inner type and build a schema-aware prompt + parse step.
+        # `isinstance(obj, Confident[Foo])` still works because the result
+        # subclasses Confident; `is_confident_schema(x)` detects the wrapper.
+        if item is Any or item is None:
+            return cls
+        tag = type(
+            f"Confident__{getattr(item, '__name__', 'T')}",
+            (cls,),
+            {"_inner_type": item},
+        )
+        return tag
+
+
+def is_confident_schema(schema) -> bool:
+    """True if `schema` is a Confident wrapper (with or without inner type)."""
+    return isinstance(schema, type) and issubclass(schema, Confident)
+
+
+def confident_inner(schema):
+    """Return the inner type of a Confident[T] schema, or None for bare Confident."""
+    return getattr(schema, "_inner_type", None) if is_confident_schema(schema) else None
 
 
 # ─── Budget ────────────────────────────────────────────────────────────
@@ -623,11 +641,25 @@ def build_intent_prompt(verb: str, input_data: Any, **kwargs) -> str:
 
     if 'output_schema' in kwargs and kwargs['output_schema'] is not None:
         schema = kwargs['output_schema']
-        if isinstance(schema, type) and schema is Confident:
-            parts.append(
-                "\nOUTPUT SCHEMA (return valid JSON):\n"
-                '{"value": <your answer>, "confidence": <float 0-1>}'
-            )
+        if is_confident_schema(schema):
+            inner = confident_inner(schema)
+            if inner is not None and dataclasses.is_dataclass(inner):
+                inner_desc = _describe_schema(inner)
+                parts.append(
+                    f"\nOUTPUT SCHEMA (return valid JSON):\n"
+                    f'{{"value": <object matching this schema>, "confidence": <float 0-1>}}'
+                    f"\n\nWhere `value` matches:\n{inner_desc}"
+                )
+            elif inner is not None and isinstance(inner, type):
+                parts.append(
+                    f"\nOUTPUT SCHEMA (return valid JSON):\n"
+                    f'{{"value": <{inner.__name__}>, "confidence": <float 0-1>}}'
+                )
+            else:
+                parts.append(
+                    "\nOUTPUT SCHEMA (return valid JSON):\n"
+                    '{"value": <your answer>, "confidence": <float 0-1>}'
+                )
         elif isinstance(schema, type) and dataclasses.is_dataclass(schema):
             schema_info = _describe_schema(schema)
             parts.append(f"\nOUTPUT SCHEMA (return valid JSON matching this):\n{schema_info}")
@@ -677,11 +709,10 @@ def parse_llm_response(text: str, output_schema=None) -> Any:
     except json.JSONDecodeError:
         raise SchemaViolation(f"LLM output is not valid JSON: {text[:200]}")
 
-    # Confident<T>: expect {value, confidence}. The inner value isn't validated
-    # against a specific type at this layer — Drift's intent codegen passes the
-    # bare Confident class, not Confident[SomeSchema], so we accept whatever
-    # the LLM gave us for `value` and just enforce the wrapper shape.
-    if isinstance(output_schema, type) and output_schema is Confident:
+    # Confident<T>: expect {value, confidence}. When an inner type is
+    # attached (via Confident[T] from codegen), recursively parse the value
+    # into that schema so `result.value` is a real dataclass instance.
+    if is_confident_schema(output_schema):
         if not isinstance(data, dict):
             raise SchemaViolation(
                 f"Expected JSON object for Confident, got {type(data).__name__}"
@@ -690,7 +721,24 @@ def parse_llm_response(text: str, output_schema=None) -> Any:
             raise SchemaViolation(
                 f"Confident output must have 'value' and 'confidence' keys, got {list(data)}"
             )
-        return Confident(data['value'], data['confidence'])
+        inner = confident_inner(output_schema)
+        raw_value = data['value']
+        if inner is not None and dataclasses.is_dataclass(inner) and isinstance(raw_value, dict):
+            valid_fields = {f.name for f in dataclasses.fields(inner)}
+            filtered = {k: v for k, v in raw_value.items() if k in valid_fields}
+            try:
+                parsed_value = inner(**filtered)
+            except TypeError as e:
+                raise SchemaViolation(f"Cannot instantiate {inner.__name__}: {e}")
+            if hasattr(parsed_value, 'validate'):
+                try:
+                    parsed_value.validate()
+                except AssertionError as e:
+                    raise SchemaViolation(
+                        f"{inner.__name__} failed constraint validation: {e}"
+                    )
+            return Confident(parsed_value, data['confidence'])
+        return Confident(raw_value, data['confidence'])
 
     # Instantiate the dataclass if applicable
     if isinstance(output_schema, type) and dataclasses.is_dataclass(output_schema):
@@ -732,12 +780,16 @@ class MockProvider:
         tokens_in = len(prompt.split()) * 2  # rough estimate
         await asyncio.sleep(0.1)  # simulate latency
 
-        if output_schema is Confident:
+        if is_confident_schema(output_schema):
             # Confident<T>: return a deterministic, high-confidence wrapper so
-            # the `is confident` branch fires by default in tests. Tests that
-            # need to exercise the uncertain branch can monkeypatch the agent's
-            # min_confidence above 0.88.
-            response = json.dumps({"value": "mock_value", "confidence": 0.88})
+            # the `is confident` branch fires by default in tests. The mock
+            # value matches the inner schema when one is attached.
+            inner = confident_inner(output_schema)
+            if inner is not None and dataclasses.is_dataclass(inner):
+                mock_value = {f.name: self._mock_field(f) for f in dataclasses.fields(inner)}
+            else:
+                mock_value = "mock_value"
+            response = json.dumps({"value": mock_value, "confidence": 0.88})
         elif output_schema is not None and dataclasses.is_dataclass(output_schema):
             # Generate mock data matching the schema
             mock_data = {}

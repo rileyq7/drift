@@ -14,6 +14,49 @@ if x { return a } otherwise { return b }
 
 Also: `otherwise if` (not `else if`). No `elif`.
 
+## Don't write `recover on X`
+
+```drift
+-- WRONG (doesn't exist)
+attempt { ... } recover on rate limited { retry }
+
+-- RIGHT
+attempt { ... } recover from {
+  RateLimited    -> retry
+  BudgetExceeded -> fail "out of budget"
+  any error      -> respond "fallback"
+}
+```
+
+Each arm is `<ErrorType> -> <body>`. Error types are PascalCase exception class names.
+
+## There is no `escalate`
+
+```drift
+-- WRONG (parses as four bare identifiers, becomes broken Python)
+escalate to human review
+
+-- RIGHT
+fail "low confidence — escalate"
+-- or
+return Decision { needs_human: true, ... }
+```
+
+## `confident<T>` and plain schemas with confidence both work
+
+Either form is fine. Pick by where you want the threshold:
+
+```drift
+-- confident<T>: threshold comes from agent's quality: or min_confidence
+let scored = rate input as confident<Decision>
+if scored is confident { return scored.value }
+
+-- plain schema: threshold inline
+schema Decision { ..., confidence: number between 0 and 1 }
+let result = rate input as Decision
+if result.confidence < 0.7 { fail "uncertain" }
+```
+
 ## Always include `as <Type>` on intent verbs
 
 ```drift

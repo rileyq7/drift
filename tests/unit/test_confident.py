@@ -35,10 +35,14 @@ class TestConfidentClass:
         c = Confident("x", "not a number")
         assert c.confidence == 0.0
 
-    def test_class_getitem_is_identity(self):
-        # `Confident[Category]` at runtime should still be the Confident class
-        # so isinstance checks and parse_llm_response dispatch work.
-        assert Confident[str] is Confident
+    def test_class_getitem_returns_tagged_subclass(self):
+        # `Confident[T]` returns a tagged subclass carrying the inner type.
+        # isinstance checks still work (subclass of Confident), but the runtime
+        # can recover the inner type for schema-aware prompts.
+        tagged = Confident[str]
+        assert tagged is not Confident
+        assert issubclass(tagged, Confident)
+        assert tagged._inner_type is str
 
 
 class TestConfidentParseResponse:

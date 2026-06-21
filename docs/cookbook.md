@@ -26,9 +26,9 @@ agent Greeter {
 
 Run: `drift run hello.drift --input '{"name":"Riley"}'`
 
-## 2. Confidence-gated escalation
+## 2. Confidence-gated routing
 
-Cheap model for the easy cases, escalate when unsure.
+Cheap model for the easy cases, auto-upgrade to a stronger model when the cheap model is uncertain.
 
 ```drift
 schema Decision {
@@ -45,13 +45,14 @@ agent GrantChecker {
     }
   }
   budget: $0.50 per run
+  quality: 0.7 minimum confidence
 
   step assess(application: string) -> Decision {
-    let scored = rate application against grant_criteria as confident<Decision>
-    if scored is confident {
-      return scored.value
+    let result = rate application against grant_criteria as Decision
+    if result.confidence < 0.7 {
+      fail "low confidence — needs human review"
     }
-    escalate to human review
+    return result
   }
 }
 ```
@@ -88,25 +89,26 @@ agent InboxSorter {
 
 ## 4. Retry with structured recovery
 
-Handle rate limits and budget caps cleanly.
+Handle rate limits and budget caps cleanly. Each arm is `<ErrorType> -> <body>`.
 
 ```drift
+import { fetch_url } from "io"
+
 agent ResilientFetcher {
   model: "claude-haiku"
   budget: $0.10 per run
 
   step fetch_and_summarize(url: string) -> string {
     attempt {
-      let content = http.get(url)
+      let content = fetch_url(url)
       return summarize content as string
-    }
-    recover on rate limited { retry }
-    recover on budget exceeded {
-      fail "ran out of budget — try a smaller input"
-    }
-    recover on failure in fetch_and_summarize {
-      respond "couldn't reach {url}, returning stub"
-      return "summary unavailable"
+    } recover from {
+      RateLimited    -> retry
+      BudgetExceeded -> fail "ran out of budget — try a smaller input"
+      any error      -> {
+        respond "couldn't reach {url}, returning stub"
+        return "summary unavailable"
+      }
     }
   }
 }
@@ -186,14 +188,14 @@ schema Priority {
 
 ## 8. Multi-agent pipeline
 
-A clean fan-out with one source-of-truth flow definition.
+A clean fan-out with one source-of-truth flow definition. Pipeline names are PascalCase.
 
 ```drift
 agent Tagger { ... }
 agent Router { ... }
 agent Notifier { ... }
 
-pipeline triage {
+pipeline Triage {
   input -> Tagger.tag -> Router.route -> Notifier.send
   Tagger.tag ~> Logger.log
 }
@@ -205,9 +207,10 @@ When the built-ins don't fit your domain.
 
 ```drift
 define verb evaluate {
-  default output: ScoreReport
-  clauses: against, considering, with
+  pattern: "evaluate {target} against {criteria}"
   prompt: "Evaluate the input against the supplied criteria. Score and explain."
+  output: ScoreReport
+  temperature: 0.2
 }
 
 schema ScoreReport {
