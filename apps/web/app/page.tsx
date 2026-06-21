@@ -1,4 +1,5 @@
 import { Drift, Shell } from "./highlight";
+import { TerminalDemo } from "./TerminalDemo";
 
 const SAMPLE = `agent InboxTriage {
   model: "gpt-5.4-nano"
@@ -80,6 +81,19 @@ export default function Page() {
             <Shell>pip install drift-lang</Shell>
           </div>
         </header>
+
+        {/* Live terminal demo */}
+        <section className="mb-20">
+          <h2 className="mb-1 text-xs font-medium uppercase tracking-[0.18em] text-[var(--color-sage-deep)]">
+            Memory that actually works across runs
+          </h2>
+          <p className="mb-5 text-sm text-[var(--color-ink-muted)]">
+            Two fresh agent instances. One persistent Dendric memory. Run 2&apos;s LLM
+            reasoning visibly cites Run 1 — by name, with numerical comparisons.
+            Real <code className="font-mono text-[12.5px]">gpt-5.4</code>, real output.
+          </p>
+          <TerminalDemo />
+        </section>
 
         {/* Code sample */}
         <section className="mb-20">
