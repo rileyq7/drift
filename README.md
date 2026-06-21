@@ -71,6 +71,15 @@ drift lex / parse         Debug tooling
 - **`define verb`** — extend the intent vocabulary with your own typed verbs.
 - **Cross-agent calls** — `OtherAgent.step(args)` just works.
 
+## Docs
+
+| File | For |
+|---|---|
+| [`LLM.md`](./LLM.md) | Coding agents (Claude, Cursor, Copilot) — complete reference for one-shot loading |
+| [`docs/language.md`](./docs/language.md) | Humans learning Drift |
+| [`docs/cookbook.md`](./docs/cookbook.md) | Copy-paste patterns |
+| [`docs/gotchas.md`](./docs/gotchas.md) | Common mistakes |
+
 ## Examples
 
 See [`examples/`](./examples) for working `.drift` programs and their generated Python:
