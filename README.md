@@ -21,7 +21,7 @@ agent InboxTriage {
     }
     for each a in analyses {
       if a.priority == "urgent" {
-        respond "URGENT — {a.subject}: {a.summary}"
+        respond "URGENT {a.subject}: {a.summary}"
       }
     }
     return analyses
@@ -29,7 +29,7 @@ agent InboxTriage {
 }
 ```
 
-A full agent — model choice, budget, parallel fan-out, structured classification, conditional output. The transpiler emits async Python that runs on Drift's thin runtime. Live against OpenAI: 5 emails, 1.82s, $0.0092, returned 5 typed dataclasses.
+A full agent: model choice, budget, parallel fan-out, structured classification, conditional output. The transpiler emits async Python that runs on Drift's thin runtime. Live against OpenAI: 5 emails, 1.82s, $0.0092, returned 5 typed dataclasses.
 
 ## Install
 
@@ -53,7 +53,7 @@ cd hello
 drift run hello.drift --input '{"name":"Riley"}'
 ```
 
-No API key required — Drift falls back to a mock provider so you see something work immediately. Drop an `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` into `.env` to use a real model.
+No API key required. Drift falls back to a mock provider so you see something work immediately. Drop an `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` into `.env` to use a real model.
 
 ## CLI
 
@@ -67,24 +67,24 @@ drift lex / parse         Debug tooling
 
 ## What's in the language
 
-- **`agent`** — top-level unit. Has `model`, `budget`, `state`, `memory`, and `step`s.
-- **`step`** — typed sub-procedure. Body is a sequence of declarative statements.
-- **Intent verbs** — `summarize`, `extract`, `classify`, `translate`, `match`, `generate`, etc. Each one becomes a typed LLM call.
-- **`confident<T>`** — confidence-gated branching. Run the cheap path when sure, escalate when not.
-- **`model { … }`** — multi-provider routing with `prefer`, `fallback`, `upgrade when confidence < 0.7`, and `stream "fast" then "slow"`.
-- **`tool name from python|mcp|rest`** — declare external tools. MCP runs against the official SDK.
-- **`pipeline`** — composable flow with `->`, `=>`, `~>`, `|>` operators.
-- **`for each x in xs parallel`** — `asyncio.gather` underneath.
-- **`attempt / recover`** — structured error handling with retry, fail, and named arms.
-- **`memory`** — short-term scratchpad or durable backend (Dendric). `remember`, `recall`, `deja_vu`, `forget`.
-- **`define verb`** — extend the intent vocabulary with your own typed verbs.
-- **Cross-agent calls** — `OtherAgent.step(args)` just works.
+- **`agent`**: top-level unit. Has `model`, `budget`, `state`, `memory`, and `step`s.
+- **`step`**: typed sub-procedure. Body is a sequence of declarative statements.
+- **Intent verbs**: `summarize`, `extract`, `classify`, `translate`, `match`, `generate`, etc. Each one becomes a typed LLM call.
+- **`confident<T>`**: confidence-gated branching. Run the cheap path when sure, escalate when not.
+- **`model { … }`**: multi-provider routing with `prefer`, `fallback`, `upgrade when confidence < 0.7`, and `stream "fast" then "slow"`.
+- **`tool name from python|mcp|rest`**: declare external tools. MCP runs against the official SDK.
+- **`pipeline`**: composable flow with `->`, `=>`, `~>`, `|>` operators.
+- **`for each x in xs parallel`**: `asyncio.gather` underneath.
+- **`attempt / recover`**: structured error handling with retry, fail, and named arms.
+- **`memory`**: short-term scratchpad or durable backend (Dendric). `remember`, `recall`, `deja_vu`, `forget`.
+- **`define verb`**: extend the intent vocabulary with your own typed verbs.
+- **Cross-agent calls**: `OtherAgent.step(args)` just works.
 
 ## Docs
 
 | File | For |
 |---|---|
-| [`LLM.md`](./LLM.md) | Coding agents (Claude, Cursor, Copilot) — complete reference for one-shot loading |
+| [`LLM.md`](./LLM.md) | Coding agents (Claude, Cursor, Copilot): complete reference for one-shot loading |
 | [`docs/language.md`](./docs/language.md) | Humans learning Drift |
 | [`docs/cookbook.md`](./docs/cookbook.md) | Copy-paste patterns |
 | [`docs/gotchas.md`](./docs/gotchas.md) | Common mistakes |
@@ -93,17 +93,17 @@ drift lex / parse         Debug tooling
 
 See [`examples/`](./examples) for working `.drift` programs and their generated Python:
 
-- `hello.drift` — minimal agent
-- `confident_demo.drift` — `confident<T>` branching
-- `grant_checker.drift` — end-to-end intent + structured return
-- `inbox_sorter.drift` — `for each … parallel` triage
-- `inbox_triage_live.drift` — the canonical 30-line demo (real-LLM verified: 5 emails, 1.82s, $0.0092)
-- `grant_checker_with_memory.drift` — Dendric-backed long-term memory
-- `grant_checker_compare.drift` — citation-proof memory: Run 2's LLM reasoning cites Run 1 by name and makes side-by-side comparisons
+- `hello.drift`: minimal agent
+- `confident_demo.drift`: `confident<T>` branching
+- `grant_checker.drift`: end-to-end intent + structured return
+- `inbox_sorter.drift`: `for each … parallel` triage
+- `inbox_triage_live.drift`: the canonical 30-line demo (real-LLM verified: 5 emails, 1.82s, $0.0092)
+- `grant_checker_with_memory.drift`: Dendric-backed long-term memory
+- `grant_checker_compare.drift`: citation-proof memory. Run 2's LLM reasoning cites Run 1 by name and makes side-by-side comparisons
 
 ## Status
 
-Alpha — language surface is stable, runtime works, 352/352 tests passing. OpenAI + Anthropic providers with strict-JSON output, MCP tools, Dendric memory, source-mapped runtime errors. Voice primitives parse but adapters aren't wired yet. Type system beyond `confident<T>` is on the roadmap.
+Alpha. Language surface is stable, runtime works, 352/352 tests passing. OpenAI + Anthropic providers with strict-JSON output, MCP tools, Dendric memory, source-mapped runtime errors. Voice primitives parse but adapters aren't wired yet. Type system beyond `confident<T>` is on the roadmap.
 
 ## License
 
