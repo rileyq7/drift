@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/drift-lang.svg)](https://pypi.org/project/drift-lang/)
 [![VS Code](https://img.shields.io/visual-studio-marketplace/v/rileyq7.drift-lang?label=VS%20Code&color=blue)](https://marketplace.visualstudio.com/items?itemName=rileyq7.drift-lang)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/tests-350%20passing-success.svg)](#)
+[![Tests](https://github.com/rileyq7/drift/actions/workflows/test.yml/badge.svg)](https://github.com/rileyq7/drift/actions/workflows/test.yml)
 
 **An intent-based language for agentic systems.** Write your agent in English-shaped blocks, run it as async Python.
 
@@ -103,7 +103,7 @@ See [`examples/`](./examples) for working `.drift` programs and their generated 
 
 ## Status
 
-Alpha — language surface is stable, runtime works, 350/350 tests passing. OpenAI + Anthropic providers with strict-JSON output, MCP tools, Dendric memory, source-mapped runtime errors. Voice primitives parse but adapters aren't wired yet. Type system beyond `confident<T>` is on the roadmap.
+Alpha — language surface is stable, runtime works, 352/352 tests passing. OpenAI + Anthropic providers with strict-JSON output, MCP tools, Dendric memory, source-mapped runtime errors. Voice primitives parse but adapters aren't wired yet. Type system beyond `confident<T>` is on the roadmap.
 
 ## License
 
