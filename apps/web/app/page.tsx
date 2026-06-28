@@ -45,7 +45,7 @@ export default function Page() {
         <header className="mb-16">
           <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-[var(--color-cream-deep)] bg-[var(--color-cream-soft)] px-3 py-1 text-xs text-[var(--color-ink-muted)]">
             <span className="size-1.5 rounded-full bg-[var(--color-sage)]" />
-            v0.1 · MIT · 350 tests passing
+            v0.1.1 · MIT · 352 tests passing
           </div>
           <h1 className="text-[clamp(48px,8vw,80px)] font-semibold leading-[0.95] tracking-[-0.03em] text-[var(--color-sage-dark)]">
             drift
@@ -287,7 +287,7 @@ export default function Page() {
         {/* Footer */}
         <footer className="border-t border-[var(--color-cream-deep)] pt-8 text-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 text-[var(--color-ink-muted)]">
-            <div>MIT · 350 tests · 0.1 alpha</div>
+            <div>MIT · 352 tests · 0.1.1 alpha</div>
             <a
               href="https://github.com/rileyq7/drift"
               className="hover:text-[var(--color-sage-deep)]"
