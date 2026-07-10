@@ -39,6 +39,34 @@ class TestMatchStatementForm:
         assert isinstance(body[0], ast.MatchStmt)
 
 
+class TestMatchCodegen:
+    def test_default_arm_first_emits_valid_python(self, transpile):
+        # A default arm written before pattern arms must still produce valid
+        # Python (default emitted last as `else:`), not `else:` before `if`.
+        import ast as py_ast
+        out = transpile(
+            'agent A { step f(x: string) { '
+            '  match x { any other -> { respond "def" } '
+            '            "a" -> { respond "a" } } '
+            '} }'
+        )
+        py_ast.parse(out)  # must not raise
+        assert "if x == " in out
+        assert "else:" in out
+        # the `if` must come before the `else` in the emitted source
+        assert out.index("if x ==") < out.index("else:")
+
+    def test_match_with_only_default_arm(self, transpile):
+        import ast as py_ast
+        out = transpile(
+            'agent A { step f(x: string) { '
+            '  match x { any other -> { respond "always" } } '
+            '} }'
+        )
+        py_ast.parse(out)
+        assert "else:" not in out  # nothing to attach else to
+
+
 class TestMatchIntentForm:
     def test_intent_with_against_and_as(self, parse_ast):
         d = parse(

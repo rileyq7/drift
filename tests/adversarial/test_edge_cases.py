@@ -36,15 +36,21 @@ class TestLexerEdges:
 
     def test_escape_in_string(self):
         toks = lex(r'"line1\nline2"')
-        # The lexer treats \ as escape-next-char (so \n becomes a literal 'n')
-        # Document the current behavior, even if it's not what most users expect.
-        assert toks[0].value == "line1nline2"
+        # Escape sequences decode to the characters they denote.
+        assert toks[0].value == "line1\nline2"
+
+    def test_escape_backslash_and_quote(self):
+        toks = lex(r'"C:\\Users\tname \"q\""')
+        assert toks[0].value == 'C:\\Users\tname "q"'
+
+    def test_unknown_escape_preserves_backslash(self):
+        toks = lex(r'"a\zb"')
+        assert toks[0].value == r"a\zb"
 
     def test_block_comment_unterminated(self):
-        # The lexer currently does NOT raise — it walks to EOF silently.
-        # That's a fragility worth flagging.
-        toks = lex("{- forever")
-        assert toks[-1].type.name == "EOF"
+        # An unterminated block comment is a lex error at EOF.
+        with pytest.raises(LexError):
+            lex("{- forever")
 
 
 # ─── Parser adversarial ─────────────────────────────────────────────

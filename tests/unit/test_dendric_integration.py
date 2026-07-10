@@ -76,17 +76,34 @@ class TestDendricCodegen:
 
 
 class TestMakeMemoryStoreFallback:
-    def test_falls_back_to_mock_without_DATABASE_URL(self, monkeypatch, capsys):
+    def test_falls_back_to_local_sqlite_without_DATABASE_URL(
+        self, monkeypatch, capsys, tmp_path
+    ):
         monkeypatch.delenv("DATABASE_URL", raising=False)
-        # Reset the one-shot notice flag so the test sees the message
-        import drift.runtime.dendric_store as ds
-        monkeypatch.setattr(ds, "_NOTICE_SHOWN", False)
+        monkeypatch.setenv("DRIFT_MEMORY_DIR", str(tmp_path))
 
         store = make_memory_store(persona="test")
         captured = capsys.readouterr()
 
         assert isinstance(store, MemoryStore)
-        assert "mock memory" in captured.out
+        # The fallback is announced...
+        assert "SQLite memory" in captured.out
+        # ...and is file-backed (persists across runs), not :memory:.
+        assert ":memory:" not in store.store_url
+        assert str(tmp_path) in store.store_url
+
+    def test_fallback_persists_across_stores(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("DRIFT_MEMORY_DIR", str(tmp_path))
+
+        s1 = make_memory_store(persona="alice")
+        s1.remember("remembered fact", tag="k")
+        s1.close()
+
+        # A fresh store for the same persona sees the earlier write.
+        s2 = make_memory_store(persona="alice")
+        recalled = s2.recall()
+        assert any("remembered fact" == r for r in recalled)
 
 
 # ── Mock MemoryStore implements the DendricStore surface ───────────────

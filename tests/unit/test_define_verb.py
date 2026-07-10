@@ -109,7 +109,9 @@ class TestRuntimeRegistration:
         from drift.runtime.core import build_intent_prompt
         register_custom_verb(name="duckspeak", prompt="QUACK ONLY.")
         system, _ = build_intent_prompt("duckspeak", "hi")
-        assert system == "QUACK ONLY."
+        # The custom prompt leads the system message (an untrusted-input guard
+        # is appended for prompt-injection defense).
+        assert system.startswith("QUACK ONLY.")
 
     @pytest.mark.asyncio
     async def test_default_output_schema_inherited(self):

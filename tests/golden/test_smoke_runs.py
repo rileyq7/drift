@@ -23,8 +23,11 @@ async def test_hello_runs(examples_dir):
     result = await agent.hello(name="Riley")
     # hello returns the generated greeting string
     assert isinstance(result, str)
-    assert agent.cost_tracker.total_cost > 0
+    # A call was made and logged...
     assert len(agent.cost_tracker.call_log) >= 1
+    # ...but mock-provider calls cost nothing — the cost report must not imply
+    # real money was spent on fabricated data.
+    assert agent.cost_tracker.total_cost == 0
 
 
 @pytest.mark.asyncio

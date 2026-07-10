@@ -30,7 +30,10 @@ STEP_MODIFIERS = {'cached', 'parallel', 'manual', 'silent'}
 class ParseError(Exception):
     def __init__(self, message: str, token: Token):
         self.token = token
-        super().__init__(f"Line {token.line}: {message} (got {token.type.name} '{token.value}')")
+        super().__init__(
+            f"Line {token.line}:{token.col}: {message} "
+            f"(got {token.type.name} '{token.value}')"
+        )
 
 
 class Parser:
@@ -88,13 +91,6 @@ class Parser:
 
     def skip_newlines(self):
         while not self.at_end() and self.peek().type == TT.NEWLINE:
-            self.pos += 1
-
-    def skip_to_next_statement(self):
-        """Skip to next newline or closing brace — used for error recovery."""
-        while not self.at_end():
-            if self.peek().type in (TT.NEWLINE, TT.RBRACE):
-                break
             self.pos += 1
 
     # ─── Top-Level ─────────────────────────────────────────────────

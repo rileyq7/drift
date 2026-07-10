@@ -43,4 +43,4 @@ def paginate(items: list[T], page: int, page_size: int) -> list[T]:
 filter = filter_  # noqa: A001  intentional
 
 
-__all__ = ["filter", "sort", "group_by", "deduplicate", "paginate"]
+__all__ = ["filter_", "filter", "sort", "group_by", "deduplicate", "paginate"]

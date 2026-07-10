@@ -13,25 +13,36 @@ def _is_real() -> bool:
 
 
 def email(to: str, subject: str, body: str) -> None:
-    """Send an email. v0.2 stub — prints to stdout unless DRIFT_NOTIFY_REAL=1."""
+    """Send an email. v0.2 stub — prints to stdout.
+
+    With DRIFT_NOTIFY_REAL=1 but no configured backend there's nothing to send
+    through, so we warn once and still print, rather than crashing the run.
+    """
     if _is_real():
-        raise NotImplementedError(
-            "Real email send requires configuring a backend. "
-            "Override drift.notify.email or wire a tool decl."
+        print(
+            "  ⚠  DRIFT_NOTIFY_REAL=1 but no email backend is configured "
+            "(override drift.notify.email or wire a tool decl); logging instead.",
+            file=sys.stderr,
         )
     print(f"  📧  to={to!r} subject={subject!r}\n      {body}", file=sys.stdout)
 
 
 def slack(channel: str, message: str) -> None:
     if _is_real():
-        raise NotImplementedError("Configure DRIFT_SLACK_WEBHOOK and override.")
+        print(
+            "  ⚠  DRIFT_NOTIFY_REAL=1 but no Slack backend is configured "
+            "(use drift.notify.webhook or override); logging instead.",
+            file=sys.stderr,
+        )
     print(f"  💬  slack#{channel}: {message}")
 
 
 async def webhook(url: str, payload: dict) -> None:
     import httpx
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload, timeout=10.0)
+        resp = await client.post(url, json=payload, timeout=10.0)
+        # A 4xx/5xx must not read as a silent success.
+        resp.raise_for_status()
 
 
 def push(title: str, body: str) -> None:

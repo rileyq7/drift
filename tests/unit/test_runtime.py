@@ -7,7 +7,7 @@ import pytest
 from drift.runtime import (
     Agent, Budget, CostTracker, ModelRouter,
     BudgetExceeded, ModelUnavailable, RateLimited, AuthError,
-    SchemaViolation, step_decorator,
+    SchemaViolation, step_decorator, run_agent,
 )
 from drift.runtime.core import parse_llm_response, MockProvider
 
@@ -100,6 +100,47 @@ class TestBudget:
         assert Budget(currency="EUR").symbol == "€"
         # Unknown currency defaults
         assert Budget(currency="JPY").symbol == "$"
+
+
+class TestCostReservation:
+    def test_reservations_count_against_budget(self):
+        # Two concurrent reservations that together exceed the cap: the second
+        # must be rejected even though nothing has been *spent* yet. This is
+        # what stops parallel fan-out from overspending.
+        ct = CostTracker(Budget(max_per_run=0.10))
+        ct.reserve(0.06)
+        with pytest.raises(BudgetExceeded):
+            ct.reserve(0.06)
+
+    def test_release_frees_reservation(self):
+        ct = CostTracker(Budget(max_per_run=0.10))
+        r = ct.reserve(0.08)
+        ct.release(r)
+        # After release the budget is free again.
+        assert ct.reserve(0.08) == 0.08
+
+    def test_settle_replaces_reservation_with_actual(self):
+        ct = CostTracker(Budget(max_per_run=1.0))
+        r = ct.reserve(0.50)          # worst-case hold
+        ct.settle(r, 0.05, "m", 10, 5)  # actual came in much lower
+        assert ct.total_cost == pytest.approx(0.05)
+        assert ct.reserved == pytest.approx(0.0)
+        # Freed reservation is available again.
+        assert ct.remaining == pytest.approx(0.95)
+
+    def test_concurrent_reservations_never_exceed_budget(self):
+        # Simulate N parallel tasks each reserving before "awaiting": the number
+        # that succeed must never let committed spend exceed the cap.
+        ct = CostTracker(Budget(max_per_run=0.10))
+        succeeded = 0
+        for _ in range(50):
+            try:
+                ct.reserve(0.008)
+                succeeded += 1
+            except BudgetExceeded:
+                pass
+        assert succeeded * 0.008 <= 0.10 + 1e-9
+        assert ct.total_cost + ct.reserved <= 0.10 + 1e-9
 
 
 # ─── parse_llm_response ─────────────────────────────────────────────
@@ -285,3 +326,31 @@ class TestExceptionShape:
         # The taxonomy should keep these distinct
         assert not issubclass(AuthError, ModelUnavailable)
         assert not issubclass(ModelUnavailable, AuthError)
+
+
+# ─── Entry-step selection ───────────────────────────────────────────
+
+class TestEntryStepSelection:
+    @pytest.mark.asyncio
+    async def test_runs_first_declared_step_not_alphabetical(self):
+        # `archive` sorts before `triage` alphabetically, but `triage` is
+        # declared first and must be the default entry point.
+        calls = []
+
+        class Ordered(Agent):
+            def __init__(self):
+                super().__init__(name="Ordered", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def triage(self):
+                calls.append("triage")
+                return "triage"
+
+            @step_decorator()
+            async def archive(self):
+                calls.append("archive")
+                return "archive"
+
+        result = await run_agent(Ordered)
+        assert result == "triage"
+        assert calls == ["triage"]

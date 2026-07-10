@@ -4,7 +4,9 @@ golden files with:
 
     python demo.py
 
-and commit the updated .py files.
+demo.py transpiles every example listed in EXAMPLE_NAMES below (its
+`drift_files` list mirrors this list), so a single run refreshes all of
+them. Commit the updated .py files.
 
 A failing test here means either:
   (a) you changed codegen and forgot to update the golden, or

@@ -49,15 +49,22 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 # ── Dendric import via sys.path injection ──────────────────────────────
-# Dendric has no installable package; we prepend its source dir to sys.path
+# Dendric has no installable package; its source dir is prepended to sys.path
 # so `from src.engine.core.engine import MemoryEngine` works. The path is
 # configurable via DENDRIC_HOME for users who put it elsewhere.
+#
+# This is done LAZILY (see _ensure_dendric_on_path), only when a DendricStore
+# is actually constructed — importing this module must not mutate sys.path for
+# every drift process, which would let anything under ~/Dendric shadow imports.
 _DENDRIC_HOME = os.environ.get(
     "DENDRIC_HOME",
     os.path.expanduser("~/Dendric"),
 )
-if _DENDRIC_HOME not in sys.path:
-    sys.path.insert(0, _DENDRIC_HOME)
+
+
+def _ensure_dendric_on_path() -> None:
+    if _DENDRIC_HOME not in sys.path:
+        sys.path.insert(0, _DENDRIC_HOME)
 
 
 def _serialize(value: Any) -> str:
@@ -120,12 +127,19 @@ class DejaVuMatch:
     # Forward unknown attribute access to the underlying memory dict so
     # `match.grant_title` works when grant_title was in the original data.
     def __getattr__(self, name: str) -> Any:
-        if name in self.__dict__:
-            return self.__dict__[name]
-        if name in self.memory:
-            return self.memory[name]
+        # __getattr__ only fires when normal lookup fails, so `self.memory`
+        # here would recurse infinitely if `memory` itself is missing (e.g.
+        # during unpickling, before __init__ runs). Guard by reading the
+        # instance dict directly and bailing out if the backing store is absent.
+        if name in ("memory", "__dict__"):
+            raise AttributeError(name)
+        memory = self.__dict__.get("memory")
+        if memory is None:
+            raise AttributeError(name)
+        if name in memory:
+            return memory[name]
         # Try to parse raw_content as JSON (for serialized dataclasses)
-        raw = self.memory.get("raw_content", "")
+        raw = memory.get("raw_content", "")
         if raw and raw.startswith("{"):
             try:
                 parsed = json.loads(raw)
@@ -168,7 +182,10 @@ class DendricStore:
     ):
         # Import lazily so a missing/misconfigured Dendric doesn't crash
         # the whole drift runtime at import time — the factory in this
-        # module catches ImportError and falls back to the mock.
+        # module catches ImportError and falls back to the mock. The sys.path
+        # injection also happens here (not at module import) so unused drift
+        # processes never get ~/Dendric on their path.
+        _ensure_dendric_on_path()
         from src.engine.core.engine import MemoryEngine  # type: ignore
         from src.engine.config import EngineConfig  # type: ignore
         from src.engine.storage import postgres as _pg_store  # type: ignore
@@ -334,41 +351,52 @@ class DendricStore:
 
 # ── Factory + mock fallback ────────────────────────────────────────────
 
-_NOTICE_SHOWN = False
+
+def _fallback_sqlite_path(persona: str) -> str:
+    """A stable on-disk SQLite path for a persona's fallback memory.
+
+    File-backed (not :memory:) so `remember` survives between `drift run`
+    invocations — an in-memory store would evaporate at process exit and make
+    a "persistent" agent silently forgetful.
+    """
+    import hashlib
+    base = os.environ.get("DRIFT_MEMORY_DIR") or os.path.join(
+        os.path.expanduser("~"), ".drift", "memory"
+    )
+    os.makedirs(base, exist_ok=True)
+    slug = hashlib.sha1((persona or "default").encode()).hexdigest()[:16]
+    return os.path.join(base, f"{slug}.db")
 
 
 def make_memory_store(persona: str = "", **kwargs) -> Any:
-    """Try real Dendric; fall back to the SQLite mock store if it can't
-    be reached. Prints a one-time notice in mock mode so users know.
+    """Try real Dendric; fall back to a file-backed SQLite store if it can't
+    be reached. Announces the fallback whenever it changes durability so a
+    misconfigured prod env doesn't silently downgrade.
 
     Generated agent __init__ calls this for `memory: dendric("name")`."""
-    global _NOTICE_SHOWN
-
     db_url = kwargs.get("db_url") or os.environ.get("DATABASE_URL")
     if db_url:
         try:
             return DendricStore(persona=persona, db_url=db_url)
         except Exception as e:
-            # Real Dendric was requested but failed — surface it loudly
-            # so a misconfigured prod env doesn't silently downgrade.
-            if not _NOTICE_SHOWN:
-                print(
-                    f"  ⚠  DendricStore unavailable ({type(e).__name__}: {e}). "
-                    "Falling back to mock memory."
-                )
-                _NOTICE_SHOWN = True
-
-    if not _NOTICE_SHOWN:
+            # Real Dendric was requested but failed — surface it loudly EVERY
+            # time (not once per process): each downgraded persona is losing
+            # the durability/semantics it asked for.
+            print(
+                f"  ⚠  DendricStore unavailable for persona {persona!r} "
+                f"({type(e).__name__}: {e}). Falling back to local SQLite memory."
+            )
+    else:
         print(
-            "  ℹ  Using mock memory (set DATABASE_URL for persistent Dendric memory)"
+            "  ℹ  No DATABASE_URL — using local file-backed SQLite memory "
+            f"for persona {persona!r} (set DATABASE_URL for Dendric)."
         )
-        _NOTICE_SHOWN = True
 
-    # Fall back to the existing SQLite MemoryStore from runtime/core.py.
-    # Tag-substring recall already exists there — good enough for dev.
+    # Fall back to the file-backed SQLite MemoryStore from runtime/core.py so
+    # memory persists across runs. Tag-substring recall is good enough for dev.
     from .core import MemoryStore
     return MemoryStore(
-        store_url="sqlite://:memory:",
+        store_url=f"sqlite://{_fallback_sqlite_path(persona)}",
         recall_strategy="relevant",
         max_recall=20,
     )

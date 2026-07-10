@@ -65,8 +65,12 @@ _MOCK_SESSION: Optional[_MockMcpSession] = None
 
 
 def use_mock(responses: Optional[dict] = None) -> _MockMcpSession:
-    """Wire a mock session into the next MCPClient created in this process.
-    Returns the mock so tests can assert on its `.calls` list.
+    """Wire a mock session into EVERY MCPClient created in this process until
+    reset. Returns the mock so tests can assert on its `.calls` list.
+
+    Applies to all clients (a program may declare several `tool ... from mcp`),
+    not just the first one created — otherwise a multi-tool program would give
+    the mock to one tool and try a real connection for the rest.
 
     Tests call this in a fixture; production code never touches it."""
     global _MOCK_SESSION
@@ -74,11 +78,14 @@ def use_mock(responses: Optional[dict] = None) -> _MockMcpSession:
     return _MOCK_SESSION
 
 
-def _take_mock() -> Optional[_MockMcpSession]:
+def reset_mock() -> None:
+    """Clear the process-wide mock session (test teardown)."""
     global _MOCK_SESSION
-    s = _MOCK_SESSION
     _MOCK_SESSION = None
-    return s
+
+
+def _current_mock() -> Optional[_MockMcpSession]:
+    return _MOCK_SESSION
 
 
 # ── Real client ────────────────────────────────────────────────────────
@@ -99,54 +106,76 @@ class MCPClient:
         self.url = url
         self.name = name or _derive_name(url)
         self._session = None
-        self._task_group = None        # AsyncExitStack equivalent
-        self._mock = _take_mock()       # set by use_mock() before init
         self._tools_cache: Optional[set[str]] = None
+        # Serializes concurrent first-callers so parallel fan-out doesn't spawn
+        # two subprocesses / sessions and orphan one. Created lazily because the
+        # client may be constructed off the event loop.
+        self._connect_lock: Optional[asyncio.Lock] = None
 
     async def _ensure_connected(self):
         if self._session is not None:
             return
+        if self._connect_lock is None:
+            self._connect_lock = asyncio.Lock()
+        async with self._connect_lock:
+            # Re-check under the lock: a racing caller may have connected while
+            # we waited.
+            if self._session is not None:
+                return
+            await self._connect()
 
-        if self._mock is not None:
-            self._session = self._mock
-            await self._session.initialize()
+    async def _connect(self):
+        # A mock installed via use_mock() applies to every client (resolved
+        # here, not consumed once at construction time).
+        mock = _current_mock()
+        if mock is not None:
+            await mock.initialize()
+            self._session = mock
             return
 
         # Real session — open via the appropriate transport.
         from contextlib import AsyncExitStack
         from mcp import ClientSession, StdioServerParameters
 
-        self._exit_stack = AsyncExitStack()
-        await self._exit_stack.__aenter__()
+        exit_stack = AsyncExitStack()
+        await exit_stack.__aenter__()
+        try:
+            scheme = self.url.split("://", 1)[0] if "://" in self.url else ""
 
-        scheme = self.url.split("://", 1)[0] if "://" in self.url else ""
-
-        if scheme in ("http", "https", "mcp+http", "mcp+sse"):
-            from mcp.client.streamable_http import streamablehttp_client
-            http_url = self.url
-            if scheme.startswith("mcp+"):
-                http_url = "http" + self.url[len(scheme):]
-            read, write, _ = await self._exit_stack.enter_async_context(
-                streamablehttp_client(http_url),
-            )
-        else:
-            # stdio: strip mcp:// and shell-split the remainder
-            from mcp.client.stdio import stdio_client
-            cmd_str = self.url[len("mcp://"):] if scheme == "mcp" else self.url
-            parts = shlex.split(cmd_str)
-            if not parts:
-                raise ValueError(
-                    f"mcp:// URL {self.url!r} has no command after the scheme"
+            if scheme in ("http", "https", "mcp+http", "mcp+sse"):
+                from mcp.client.streamable_http import streamablehttp_client
+                http_url = self.url
+                if scheme.startswith("mcp+"):
+                    http_url = "http" + self.url[len(scheme):]
+                read, write, _ = await exit_stack.enter_async_context(
+                    streamablehttp_client(http_url),
                 )
-            params = StdioServerParameters(command=parts[0], args=parts[1:])
-            read, write = await self._exit_stack.enter_async_context(
-                stdio_client(params),
-            )
+            else:
+                # stdio: strip mcp:// and shell-split the remainder
+                from mcp.client.stdio import stdio_client
+                cmd_str = self.url[len("mcp://"):] if scheme == "mcp" else self.url
+                parts = shlex.split(cmd_str)
+                if not parts:
+                    raise ValueError(
+                        f"mcp:// URL {self.url!r} has no command after the scheme"
+                    )
+                params = StdioServerParameters(command=parts[0], args=parts[1:])
+                read, write = await exit_stack.enter_async_context(
+                    stdio_client(params),
+                )
 
-        self._session = await self._exit_stack.enter_async_context(
-            ClientSession(read, write),
-        )
-        await self._session.initialize()
+            session = await exit_stack.enter_async_context(
+                ClientSession(read, write),
+            )
+            await session.initialize()
+        except BaseException:
+            # If anything fails mid-connect, unwind the partially-entered stack
+            # so we don't leak the subprocess / HTTP session.
+            await exit_stack.__aexit__(None, None, None)
+            raise
+        # Only publish the session once fully initialized.
+        self._exit_stack = exit_stack
+        self._session = session
 
     async def call(self, method_name: str, **kwargs) -> Any:
         """Invoke an MCP tool by name. Drift codegen routes
@@ -161,6 +190,10 @@ class MCPClient:
         return [t.name for t in listing.tools]
 
     async def close(self):
+        # NOTE: anyio-based MCP transports must be torn down from the same task
+        # that entered them. Call close() from the task that first triggered
+        # the connection (or the top-level runner), not from a short-lived
+        # fan-out task, or the cancel-scope teardown will raise.
         if hasattr(self, "_exit_stack"):
             await self._exit_stack.__aexit__(None, None, None)
             del self._exit_stack

@@ -131,10 +131,11 @@ class TestMemoryStoreRuntime:
         store.remember(Tag(name="a", score=0.5), tag="x")
         store.remember(Tag(name="b", score=0.9), tag="x")
         out = store.recall()
-        # Stored values come back as dicts (we lose type info), with the
-        # dataclass type recorded under __dataclass__.
-        assert out[0]["__dataclass__"] == "Tag"
-        assert out[0]["data"]["name"] == "b"
+        # Stored dataclasses come back as plain field dicts (type info is lost,
+        # but the serialization envelope is unwrapped — recall is symmetric
+        # with remember).
+        assert out[0]["name"] == "b"
+        assert out[0]["score"] == 0.9
 
     def test_file_backed_store_persists(self, tmp_path):
         path = tmp_path / "mem.db"

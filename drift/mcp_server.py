@@ -57,9 +57,14 @@ def _check(source: str) -> dict:
     return {"ok": True}
 
 
-def _run(source: str, input_json: str | None = None) -> dict:
+async def _run(source: str, input_json: str | None = None) -> dict:
     """Transpile + exec a Drift program against the runtime. Returns
-    {ok, result?, cost?, calls?, error?, traceback?}."""
+    {ok, result?, cost?, calls?, error?, traceback?}.
+
+    Async because it awaits the agent directly: the MCP server calls this from
+    an already-running event loop, so `asyncio.run()` here would raise
+    "cannot be called from a running event loop".
+    """
     try:
         python_source = _transpile(source)
     except LexError as e:
@@ -72,45 +77,52 @@ def _run(source: str, input_json: str | None = None) -> dict:
         py_path.write_text(python_source)
 
         import importlib.util
-        spec = importlib.util.spec_from_file_location("drift_mcp_program", py_path)
+        module_name = "drift_mcp_program"
+        prev_module = sys.modules.get(module_name)
+        spec = importlib.util.spec_from_file_location(module_name, py_path)
         module = importlib.util.module_from_spec(spec)
-        sys.modules["drift_mcp_program"] = module
+        sys.modules[module_name] = module
         try:
-            spec.loader.exec_module(module)
-        except Exception as e:
-            return {"ok": False, "stage": "import", "error": str(e)}
+            try:
+                spec.loader.exec_module(module)
+            except Exception as e:
+                return {"ok": False, "stage": "import", "error": str(e)}
 
-        from drift.runtime.core import Agent, run_agent
-        agents = {n: getattr(module, n) for n in dir(module)
-                  if isinstance(getattr(module, n), type)
-                  and issubclass(getattr(module, n), Agent)
-                  and getattr(module, n) is not Agent}
-        if not agents:
-            return {"ok": False, "stage": "discover", "error": "No agents in program"}
+            from drift.runtime.core import Agent, run_agent
+            agents = {n: getattr(module, n) for n in dir(module)
+                      if isinstance(getattr(module, n), type)
+                      and issubclass(getattr(module, n), Agent)
+                      and getattr(module, n) is not Agent}
+            if not agents:
+                return {"ok": False, "stage": "discover", "error": "No agents in program"}
 
-        agent_cls = next(iter(agents.values()))
-        inputs = json.loads(input_json) if input_json else {}
+            agent_cls = next(iter(agents.values()))
+            inputs = json.loads(input_json) if input_json else {}
 
-        # Capture stdout so the run banner doesn't pollute the MCP channel.
-        old_out = sys.stdout
-        buf = io.StringIO()
-        sys.stdout = buf
-        try:
-            result = asyncio.run(run_agent(agent_cls, inputs=inputs))
-        except Exception as e:
-            sys.stdout = old_out
-            return {"ok": False, "stage": "run", "error": f"{type(e).__name__}: {e}"}
+            # Capture stdout so the run banner doesn't pollute the MCP channel.
+            old_out = sys.stdout
+            buf = io.StringIO()
+            sys.stdout = buf
+            try:
+                result = await run_agent(agent_cls, inputs=inputs)
+            except Exception as e:
+                return {"ok": False, "stage": "run", "error": f"{type(e).__name__}: {e}"}
+            finally:
+                sys.stdout = old_out
+
+            banner = buf.getvalue()
+            return {
+                "ok": True,
+                "result": _to_jsonable(result),
+                "banner": banner,
+            }
         finally:
-            sys.stdout = old_out
-
-        # Best-effort cost recovery via the agent class's last instance is
-        # awkward; for now return the captured banner so the caller can grep.
-        banner = buf.getvalue()
-        return {
-            "ok": True,
-            "result": _to_jsonable(result),
-            "banner": banner,
-        }
+            # Restore/clear the module slot we hijacked so concurrent or
+            # subsequent runs don't see a stale program module.
+            if prev_module is not None:
+                sys.modules[module_name] = prev_module
+            else:
+                sys.modules.pop(module_name, None)
 
 
 def _to_jsonable(obj: Any) -> Any:
@@ -193,7 +205,7 @@ def serve_stdio():
             except (LexError, ParseError) as e:
                 result = {"ok": False, "error": str(e)}
         elif name == "drift_run":
-            result = _run(arguments["source"], arguments.get("input"))
+            result = await _run(arguments["source"], arguments.get("input"))
         else:
             result = {"ok": False, "error": f"unknown tool {name!r}"}
 

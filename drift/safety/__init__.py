@@ -26,9 +26,15 @@ def redact_pii(text: str) -> str:
 
 
 def check_content(text: str, banned_patterns: list[str] = None) -> bool:
-    """Return True if text contains none of the banned patterns."""
+    """Return True if text contains none of the banned patterns.
+
+    Patterns are matched as case-insensitive literal substrings, not regex —
+    a banned word like "C(1)" would otherwise raise re.error, and users
+    generally mean "does this word appear", not "does this regex match".
+    """
     banned_patterns = banned_patterns or []
-    return not any(re.search(p, text) for p in banned_patterns)
+    haystack = text.lower()
+    return not any(str(p).lower() in haystack for p in banned_patterns)
 
 
 def sanitize(text: str, max_length: int = 4000) -> str:

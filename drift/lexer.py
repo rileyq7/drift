@@ -11,6 +11,20 @@ from enum import Enum, auto
 from typing import Iterator
 
 
+# Escape sequences recognized inside "regular" (single-quoted-style) strings.
+# The value stored on the token is the *decoded* text; codegen re-escapes it
+# safely when emitting Python (see codegen._py_str_literal / _gen_fstring).
+_STRING_ESCAPES = {
+    'n': '\n',
+    't': '\t',
+    'r': '\r',
+    '\\': '\\',
+    '"': '"',
+    "'": "'",
+    '0': '\0',
+}
+
+
 class TT(Enum):
     """Token types. Kept minimal — the parser disambiguates by context."""
     # Literals
@@ -171,6 +185,8 @@ def lex(source: str) -> list[Token]:
                 else:
                     i += 1
                     col += 1
+            if depth > 0:
+                raise LexError("Unterminated block comment", start_line, start_col)
             tokens.append(Token(TT.COMMENT, source[start:i], start_line, start_col))
             continue
 
@@ -185,10 +201,12 @@ def lex(source: str) -> list[Token]:
                 i += 2
                 col += 2
                 buf = []
+                closed = False
                 while i < length:
                     if source[i] == '"' and i + 2 < length and source[i+1] == '"' and source[i+2] == '"':
                         i += 3
                         col += 3
+                        closed = True
                         break
                     if source[i] == '\n':
                         buf.append('\n')
@@ -198,13 +216,21 @@ def lex(source: str) -> list[Token]:
                         buf.append(source[i])
                         col += 1
                     i += 1
+                if not closed:
+                    raise LexError("Unterminated string", start_line, start_col)
                 tokens.append(Token(TT.STRING, ''.join(buf), start_line, start_col))
             else:
                 # Regular string
                 buf = []
                 while i < length and source[i] != '"':
                     if source[i] == '\\' and i + 1 < length:
-                        buf.append(source[i + 1])
+                        # Decode the escape to the character it denotes. Unknown
+                        # escapes are preserved as backslash + char rather than
+                        # silently dropping the backslash. Brace escapes are left
+                        # to the `{{`/`}}` interpolation convention (see codegen),
+                        # so we don't special-case `\{`/`\}` here.
+                        esc = source[i + 1]
+                        buf.append(_STRING_ESCAPES.get(esc, '\\' + esc))
                         i += 2
                         col += 2
                     elif source[i] == '\n':
@@ -227,23 +253,35 @@ def lex(source: str) -> list[Token]:
             i += 1
             col += 1
             num_start = i
+            dots = 0
             while i < length and (source[i].isdigit() or source[i] == '.'):
+                if source[i] == '.':
+                    dots += 1
                 i += 1
                 col += 1
-            if i > num_start:
-                tokens.append(Token(TT.CURRENCY, symbol + source[num_start:i], line, start_col))
-            else:
+            if i <= num_start:
                 raise LexError(f"Expected number after currency symbol '{symbol}'", line, start_col)
+            if dots > 1:
+                raise LexError(
+                    f"Malformed currency literal '{symbol}{source[num_start:i]}'",
+                    line, start_col,
+                )
+            tokens.append(Token(TT.CURRENCY, symbol + source[num_start:i], line, start_col))
             continue
 
         # --- Numbers (including duration: 30s, 5m, 2h, 1d) ---
         if ch.isdigit():
             start_col = col
             num_start = i
+            dots = 0
             while i < length and (source[i].isdigit() or source[i] == '.'):
+                if source[i] == '.':
+                    dots += 1
                 i += 1
                 col += 1
             num_str = source[num_start:i]
+            if dots > 1:
+                raise LexError(f"Malformed number literal '{num_str}'", line, start_col)
             # Check for duration suffix
             if i < length and source[i] in ('s', 'm', 'h', 'd') and (i + 1 >= length or not source[i + 1].isalpha()):
                 suffix = source[i]
