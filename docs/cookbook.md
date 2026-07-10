@@ -197,7 +197,6 @@ agent Notifier { ... }
 
 pipeline Triage {
   input -> Tagger.tag -> Router.route -> Notifier.send
-  Tagger.tag ~> Logger.log
 }
 ```
 

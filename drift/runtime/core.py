@@ -1259,6 +1259,25 @@ def get_provider(model: str = None):
 
 # ─── Step Decorator ────────────────────────────────────────────────────
 
+def _cache_key(args, kwargs) -> str:
+    """Best-effort stable key for `cached step` memoization.
+
+    Args are typically JSON-shaped (str/int/float/bool/None/list/dict) or
+    dataclasses coming from prior steps, so json.dumps with a dataclass
+    fallback covers real usage; anything else falls back to repr() rather
+    than raising, since a slightly-too-broad cache key is safer than a step
+    that crashes because its inputs happen to be unhashable.
+    """
+    def _default(o):
+        if dataclasses.is_dataclass(o):
+            return dataclasses.asdict(o)
+        return repr(o)
+    try:
+        return json.dumps({"args": args, "kwargs": kwargs}, default=_default, sort_keys=True)
+    except TypeError:
+        return repr((args, kwargs))
+
+
 def step_decorator(output=None, modifier=""):
     """Decorator that wraps agent steps with cost tracking, checkpointing, and retries.
 
@@ -1269,6 +1288,15 @@ def step_decorator(output=None, modifier=""):
       - RateLimited: wait (respecting retry_after) and retry on the same model.
       - AuthError: fail fast — no retry helps.
       - BudgetExceeded: fail fast — retrying would only burn more budget.
+
+    Modifiers:
+      - "cached": memoize per agent-instance, keyed on (step name, args, kwargs).
+        Scope is a single run, not cross-process — Drift has no durable step
+        cache — so this only helps when a step is called more than once with
+        the same inputs within one agent's lifetime (e.g. from a loop or from
+        multiple pipeline branches).
+      - "silent": suppress `respond` output (both the printed line and the
+        entry in self._outputs) for the duration of this step only.
     """
     def decorator(func):
         func._drift_step = True
@@ -1279,6 +1307,15 @@ def step_decorator(output=None, modifier=""):
         async def wrapper(self, *args, **kwargs):
             step_name = func.__name__
             max_retries = 3
+
+            cache = cache_key = None
+            if modifier == "cached":
+                cache = getattr(self, '_drift_step_cache', None)
+                if cache is None:
+                    cache = self._drift_step_cache = {}
+                cache_key = (step_name, _cache_key(args, kwargs))
+                if cache_key in cache:
+                    return cache[cache_key]
 
             # Clear transient unavailability at the start of each step. A 503
             # on a previous step shouldn't degrade this one.
@@ -1293,55 +1330,65 @@ def step_decorator(output=None, modifier=""):
                 setattr(exc, '_drift_step', step_name)
                 return exc
 
-            last_error = None
-            for attempt in range(max_retries):
-                try:
-                    result = await func(self, *args, **kwargs)
-                    if output and dataclasses.is_dataclass(output) and isinstance(result, output):
-                        if hasattr(result, 'validate'):
-                            result.validate()
-                    return result
+            was_silent = getattr(self, '_drift_silent', False)
+            if modifier == "silent":
+                self._drift_silent = True
 
-                except SchemaViolation as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        print(f"  ⟳  Schema violation in {step_name}, retrying ({attempt + 1}/{max_retries})")
-                        continue
-                    raise _tag(StepFailed(
-                        f"Step '{step_name}' failed after {max_retries} attempts: {e}"
-                    ))
+            try:
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        result = await func(self, *args, **kwargs)
+                        if output and dataclasses.is_dataclass(output) and isinstance(result, output):
+                            if hasattr(result, 'validate'):
+                                result.validate()
+                        if modifier == "cached":
+                            cache[cache_key] = result
+                        return result
 
-                except ModelUnavailable as e:
-                    last_error = e
-                    self.model.mark_unavailable(getattr(e, 'model', None))
-                    if attempt < max_retries - 1 and self.model.candidates():
-                        next_model = self.model.candidates()[0]
-                        print(f"  ⟳  {getattr(e, 'model', '?')} unavailable, falling back to {next_model}")
-                        continue
-                    raise _tag(StepFailed(
-                        f"Step '{step_name}' failed: no models available ({e})"
-                    ))
+                    except SchemaViolation as e:
+                        last_error = e
+                        if attempt < max_retries - 1:
+                            print(f"  ⟳  Schema violation in {step_name}, retrying ({attempt + 1}/{max_retries})")
+                            continue
+                        raise _tag(StepFailed(
+                            f"Step '{step_name}' failed after {max_retries} attempts: {e}"
+                        ))
 
-                except RateLimited as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        # Cap the wait: a hostile/misconfigured `retry-after:
-                        # 3600` header shouldn't block the run for an hour.
-                        wait = e.retry_after if e.retry_after else 2 ** attempt
-                        wait = min(wait, 60)
-                        print(f"  ⟳  Rate limited on {e.model}, waiting {wait:.1f}s")
-                        await asyncio.sleep(wait)
-                        continue
-                    raise _tag(StepFailed(
-                        f"Step '{step_name}' failed after {max_retries} rate-limited attempts"
-                    ))
+                    except ModelUnavailable as e:
+                        last_error = e
+                        self.model.mark_unavailable(getattr(e, 'model', None))
+                        if attempt < max_retries - 1 and self.model.candidates():
+                            next_model = self.model.candidates()[0]
+                            print(f"  ⟳  {getattr(e, 'model', '?')} unavailable, falling back to {next_model}")
+                            continue
+                        raise _tag(StepFailed(
+                            f"Step '{step_name}' failed: no models available ({e})"
+                        ))
 
-                except (AuthError, BudgetExceeded) as e:
-                    raise _tag(e)
+                    except RateLimited as e:
+                        last_error = e
+                        if attempt < max_retries - 1:
+                            # Cap the wait: a hostile/misconfigured `retry-after:
+                            # 3600` header shouldn't block the run for an hour.
+                            wait = e.retry_after if e.retry_after else 2 ** attempt
+                            wait = min(wait, 60)
+                            print(f"  ⟳  Rate limited on {e.model}, waiting {wait:.1f}s")
+                            await asyncio.sleep(wait)
+                            continue
+                        raise _tag(StepFailed(
+                            f"Step '{step_name}' failed after {max_retries} rate-limited attempts"
+                        ))
 
-            raise _tag(StepFailed(
-                f"Step '{step_name}' failed after {max_retries} attempts: {last_error}"
-            ))
+                    except (AuthError, BudgetExceeded) as e:
+                        raise _tag(e)
+
+                raise _tag(StepFailed(
+                    f"Step '{step_name}' failed after {max_retries} attempts: {last_error}"
+                ))
+            finally:
+                if modifier == "silent":
+                    self._drift_silent = was_silent
 
         return wrapper
     return decorator
@@ -1467,7 +1514,10 @@ class Agent:
         return result
 
     def output(self, text: str):
-        """Handle respond statements."""
+        """Handle respond statements. Suppressed entirely while a `silent
+        step` is on the call stack (see step_decorator)."""
+        if getattr(self, '_drift_silent', False):
+            return
         self._outputs.append(str(text))
         print(f"  ◆  {text}")
 
@@ -1500,10 +1550,13 @@ async def run_agent(agent_class: type, step_name: str = None,
         # Find the FIRST-DECLARED step, not the alphabetically-first one.
         # dir() is sorted alphabetically, so we sort decorated steps by the
         # source line of the function they wrap to recover declaration order.
+        # `manual` steps are excluded — they only run via an explicit --step
+        # or an internal call from another step.
         decorated = []
         for attr_name in dir(agent):
             attr = getattr(agent, attr_name)
-            if callable(attr) and hasattr(attr, '__wrapped__'):
+            if (callable(attr) and hasattr(attr, '__wrapped__')
+                    and getattr(attr.__wrapped__, '_drift_modifier', '') != 'manual'):
                 lineno = getattr(getattr(attr.__wrapped__, '__code__', None),
                                  'co_firstlineno', 1 << 30)
                 decorated.append((lineno, attr_name, attr))

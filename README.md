@@ -83,7 +83,7 @@ drift lex / parse         Debug tooling
 - **`confident<T>`**: confidence-gated branching. Run the cheap path when sure, `fail` or hand off to a stronger path when not. (There is no `escalate` keyword.)
 - **`model { … }`**: multi-provider routing with `prefer`, `fallback`, `upgrade when confidence < 0.7`, and `stream "fast" then "slow"`.
 - **`tool`**: declare external tools. `tool name from mcp "..."` or `tool name from python "mod:fn"`; REST tools use the inline block form (`tool name { endpoint: ... action ... }`) — there is no `from rest`. MCP runs against the official SDK.
-- **`pipeline`**: composable flow. `->` is sequential and `=>` is parallel fan-out (`asyncio.gather` over items); `~>` (conditional) and `|>` (stream) parse but aren't honored yet.
+- **`pipeline`**: composable flow. `->` is sequential and `=>` is parallel fan-out (`asyncio.gather` over items); `~>` (conditional) and `|>` (stream) parse but are compile errors — not implemented yet, and not silently downgraded to `->` either.
 - **`for each x in xs parallel`**: `asyncio.gather` underneath.
 - **`attempt / recover`**: structured error handling with retry, fail, and named arms.
 - **`memory`**: short-term scratchpad or durable backend (Dendric). `remember`, `recall`, `deja_vu`, `forget`.

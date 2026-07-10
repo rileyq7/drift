@@ -24,7 +24,7 @@ from pathlib import Path
 from drift import __version__
 from drift.lexer import lex, LexError
 from drift.parser import Parser, ParseError
-from drift.codegen import CodeGenerator
+from drift.codegen import CodeGenerator, CodegenError
 from drift.formatter import format_source
 
 
@@ -232,17 +232,26 @@ def cmd_fmt(args):
 
 
 def cmd_check(args):
-    """Validate syntax without running or emitting Python."""
+    """Validate syntax AND that it lowers to Python, without running it.
+
+    Codegen runs (discarding its output) so constructs that parse but can't
+    be safely/meaningfully compiled — e.g. `~>`/`|>` pipeline edges,
+    `parallel step` — are caught here rather than only at `run`/`transpile`.
+    """
     source = read_source(args.file)
     try:
         tokens = lex(source)
         parser = Parser(tokens)
-        parser.parse()
+        program = parser.parse()
+        CodeGenerator().generate(program)
     except LexError as e:
         _print_lex_error(args.file, source, e)
         sys.exit(1)
     except ParseError as e:
         _print_parse_error(args.file, source, e)
+        sys.exit(1)
+    except CodegenError as e:
+        print(f"  ✗ {args.file} — {e}")
         sys.exit(1)
     print(f"  ✓ {args.file} — syntax OK")
 

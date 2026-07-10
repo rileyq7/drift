@@ -187,11 +187,10 @@ For non-trivial multi-step flows, pipelines are clearer than nested steps. Pipel
 ```drift
 pipeline Triage {
   input -> Classifier.tag -> Router.route => Action.execute
-  Classifier.tag ~> Logger.log
 }
 ```
 
-Operators (current behavior): `->` sequential; `=>` **parallel fan-out** — the upstream node's output must be iterable and the downstream node runs concurrently over each item via `asyncio.gather`. `~>` (conditional) and `|>` (stream) are **parsed but not yet honored** — both currently compile to a plain sequential call with a warning comment, so treat them as experimental.
+Operators (current behavior): `->` sequential; `=>` **parallel fan-out** — the upstream node's output must be iterable and the downstream node runs concurrently over each item via `asyncio.gather`. `~>` (conditional) and `|>` (stream) are **parsed but not implemented** — using either as a pipeline edge is a compile error (`CodegenError`) at `drift check`/`transpile`/`run` time, not a silent fallback. Use `->` or `=>` instead.
 
 ## See also
 

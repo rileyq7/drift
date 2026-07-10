@@ -30,7 +30,7 @@ from typing import Any
 
 from drift.lexer import lex, LexError
 from drift.parser import Parser, ParseError
-from drift.codegen import CodeGenerator
+from drift.codegen import CodeGenerator, CodegenError
 
 
 def _transpile(source: str) -> str:
@@ -42,9 +42,13 @@ def _transpile(source: str) -> str:
 
 
 def _check(source: str) -> dict:
+    """Validate syntax AND that it lowers to Python (codegen runs, output
+    discarded), so constructs that parse but can't be compiled — e.g. `~>`/
+    `|>` pipeline edges, `parallel step` — are caught here too."""
     try:
         tokens = lex(source)
-        Parser(tokens).parse()
+        program = Parser(tokens).parse()
+        CodeGenerator().generate(program)
     except LexError as e:
         return {"ok": False, "kind": "lex", "message": str(e), "line": e.line, "col": e.col}
     except ParseError as e:
@@ -54,6 +58,8 @@ def _check(source: str) -> dict:
             "message": str(e),
             "line": tok.line, "col": tok.col,
         }
+    except CodegenError as e:
+        return {"ok": False, "kind": "codegen", "message": str(e)}
     return {"ok": True}
 
 

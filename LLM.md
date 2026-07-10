@@ -231,9 +231,13 @@ step name(p1: T1, p2: T2) -> ReturnType {
 }
 ```
 
-Modifiers (prefix the `step` keyword, mutually exclusive): `cached`, `parallel`, `manual`, `silent`.
+Modifiers (prefix the `step` keyword, mutually exclusive): `cached`, `manual`, `silent`.
 
-> **Not yet enforced.** All four modifiers parse and are threaded to the step decorator, but the runtime never reads them — they are currently **no-ops**. `cached` does not memoize, `manual` does not gate on `--step`, `silent` does not suppress `respond`, and `parallel` does nothing at the step level (real concurrency comes from `for each ... parallel` and the pipeline `=>` operator). Treat these as experimental / reserved syntax until wired up.
+- `cached` — memoizes on `(step name, args, kwargs)` for the lifetime of one agent instance (i.e. one run). Not a durable/cross-run cache. A failed call is not cached, so it retries next time.
+- `manual` — excluded from auto-selection as the run's entry point (the step `drift run` picks when no `--step` is given). Still runs via `drift run file.drift --step name` or an ordinary internal call from another step.
+- `silent` — suppresses `respond` output (both the printed line and the `self._outputs` entry) for the duration of that step only; nested non-silent steps called from within it are unaffected once they return.
+
+`parallel step` **does not exist** — it's a parse error (`CodegenError`) raised at `drift check`/`transpile`/`run` time. A bare step-level modifier can't say what it runs in parallel *with*; express concurrency at the call site instead: `for each x in xs parallel { ... }` inside a step, or a pipeline `=>` fan-out edge.
 
 A step with no return type returns whatever the last expression evaluates to.
 
@@ -438,16 +442,13 @@ Compose steps and agent calls into a directed graph. **Pipeline names must be Pa
 ```drift
 pipeline Triage {
   input_email -> Classifier.tag -> Router.route => Action.execute
-  Classifier.tag ~> Logger.log
-  Action.execute |> Notifier.send
 }
 ```
 
 Operators (what codegen actually emits today):
 - `->` sequential (default) — thread the previous node's output into the next.
 - `=>` **parallel fan-out** — the previous node's output must be iterable; the next node runs concurrently over each item via `asyncio.gather`. Not "strict sequential".
-- `~>` conditional — **not yet honored.** Compiles to an unconditional sequential call plus a `# conditional ~> not yet honored; running unconditionally` comment. Treat as experimental.
-- `|>` stream — **not yet honored.** Compiles to a plain sequential call plus a `# stream |> not yet honored; running as sequential` comment. Treat as experimental. (Note: `|>` *inside an expression* is a separate, working function-composition pipe; the not-yet-honored caveat only applies to `|>` as a pipeline edge.)
+- `~>` conditional and `|>` stream — **not implemented.** Both parse (the grammar accepts them) but codegen raises `CodegenError` the moment it sees one as a pipeline edge, at `drift check`/`transpile`/`run` time — there is no silent fallback. Don't emit these; use `->` or `=>` instead. (Note: `|>` *inside an expression*, e.g. `x |> f |> g`, is a separate, working function-composition pipe — unrelated to `|>` as a pipeline edge.)
 
 Each node is a step name (current file's first agent) or `Agent.step` (any agent). Pipelines run via `drift run --pipeline <name>`.
 

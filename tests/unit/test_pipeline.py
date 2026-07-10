@@ -2,6 +2,7 @@
 import pytest
 
 from drift import ast_nodes as ast
+from drift.codegen import CodegenError
 
 
 class TestPipelineParse:
@@ -100,6 +101,22 @@ class TestPipelineCodegen:
         )
         assert "try:" in out
         assert "skipping f" in out
+
+    def test_conditional_edge_is_rejected_at_codegen(self, transpile):
+        # `~>` parses (see TestPipelineParse.test_conditional_op) but has no
+        # runtime semantics — codegen must refuse to silently run it as `->`.
+        with pytest.raises(CodegenError, match="~>"):
+            transpile(
+                "agent A { step f(x: string) -> string { return x } } "
+                "pipeline P { use A A.f ~> A.f }"
+            )
+
+    def test_stream_edge_is_rejected_at_codegen(self, transpile):
+        with pytest.raises(CodegenError, match=r"\|>"):
+            transpile(
+                "agent A { step f(x: string) -> string { return x } } "
+                "pipeline P { use A A.f |> A.f }"
+            )
 
 
 class TestPipelineEndToEnd:

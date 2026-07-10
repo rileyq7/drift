@@ -324,14 +324,13 @@ class CodeGenerator:
                 f"_prev = await asyncio.gather(*[{callable_expr}(item) for item in _prev])"
             )
             self.emit_line(f"results[{edge.to_node!r}] = _prev")
-        elif edge.op == "~>":
-            self.emit_line(f"# conditional ~> not yet honored; running unconditionally")
-            self.emit_line(f"_prev = await {callable_expr}(_prev)")
-            self.emit_line(f"results[{edge.to_node!r}] = _prev")
-        elif edge.op == "|>":
-            self.emit_line(f"# stream |> not yet honored; running as sequential")
-            self.emit_line(f"_prev = await {callable_expr}(_prev)")
-            self.emit_line(f"results[{edge.to_node!r}] = _prev")
+        elif edge.op in ("~>", "|>"):
+            kind = "conditional ~>" if edge.op == "~>" else "streaming |>"
+            raise CodegenError(
+                f"pipeline edge `{edge.op}` before {edge.to_node!r} is not implemented — "
+                f"{kind} pipeline edges parse but the runtime has no semantics for them yet. "
+                "Use `->` (sequential) or `=>` (parallel fan-out) instead."
+            )
 
     def _pipeline_node_callable(self, node: str, pipe: ast.PipelineDecl) -> str:
         """Resolve a node name to an awaitable callable.
@@ -703,6 +702,13 @@ class CodeGenerator:
         ret_schema = "None"
         if step.return_type:
             ret_schema = self.gen_type(step.return_type)
+
+        if step.modifier == "parallel":
+            raise CodegenError(
+                "`parallel step` is not implemented — a step modifier alone doesn't "
+                "say what it runs in parallel with. Use `for each x in xs parallel { ... }` "
+                "or a pipeline `=>` fan-out edge to express concurrency instead."
+            )
 
         modifier_args = ""
         if step.modifier:
