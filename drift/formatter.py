@@ -84,9 +84,30 @@ def format_source(source: str) -> str:
     return "\n".join(out) + "\n"
 
 
+_STRING_ESCAPE_OUT = {
+    '\\': '\\\\',
+    '"': '\\"',
+    '\n': '\\n',
+    '\t': '\\t',
+    '\r': '\\r',
+    '\0': '\\0',
+}
+
+
+def _escape_drift_string(value: str) -> str:
+    """Re-escape a decoded string value back into Drift source form.
+
+    The lexer stores the *decoded* text (escapes resolved), so rendering it
+    verbatim would corrupt quotes/backslashes and break the idempotence
+    invariant format(format(x)) == format(x). Escaping mirrors the lexer's
+    decode table so a round-trip is stable.
+    """
+    return ''.join(_STRING_ESCAPE_OUT.get(ch, ch) for ch in value)
+
+
 def _render_token(t: Token) -> str:
     if t.type == TT.STRING:
-        return '"' + t.value + '"'
+        return '"' + _escape_drift_string(t.value) + '"'
     return t.value
 
 
