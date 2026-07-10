@@ -455,6 +455,22 @@ Operators (what codegen actually emits today):
 
 Each node is a step name (current file's first agent) or `Agent.step` (any agent). Pipelines run via `drift run --pipeline <name>`.
 
+### 12.1 Pipeline modifiers
+
+```drift
+pipeline Triage {
+  timeout: 30s
+  use A use B
+  A.classify -> B.route on failure in route: skip and continue
+  A.classify -> B.route on budget exceeded: finish current item then stop
+}
+```
+
+- `timeout: <duration>` — real: wraps the whole run in `asyncio.wait_for`; a timed-out run raises `asyncio.TimeoutError`.
+- `on failure in <step>: skip ...` — real: wraps that node in try/except, logs, and continues the pipeline with the pre-failure value. **Only a `skip...`-prefixed phrase is implemented.** Any other phrase (`retry twice then fail`, `notify oncall`, etc.) parses but is a `CodegenError` at compile time — it is not silently ignored, but it's also not interpreted; write your own retry logic in the step instead if you need it.
+- `on budget exceeded: <phrase>` — real but limited: catches `BudgetExceeded`, logs the declared phrase, and **always re-raises**. The phrase is not parsed as an instruction (there's no "finish current item then stop" behavior distinct from "stop") — it's just echoed into the log line so you know which handler fired.
+- `schedule: "<phrase>"` — **not implemented.** Parses, but is a `CodegenError` at compile time: there's no daemon/cron loop in Drift, so nothing would ever re-invoke `run()` on a schedule. Drive scheduling externally (cron, a task queue) and call `drift run` from there.
+
 ---
 
 ## 13. `define verb` declaration

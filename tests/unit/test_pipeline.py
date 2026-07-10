@@ -118,6 +118,39 @@ class TestPipelineCodegen:
                 "pipeline P { use A A.f |> A.f }"
             )
 
+    def test_schedule_is_rejected_at_codegen(self, transpile):
+        # `schedule:` parses (nothing drives it — no daemon/cron loop exists)
+        # so codegen must refuse rather than silently ignore it.
+        with pytest.raises(CodegenError, match="schedule"):
+            transpile(
+                "agent A { step f(x: string) -> string { return x } } "
+                'pipeline P { schedule: "every Monday at 9am" use A A.f -> A.f }'
+            )
+
+    def test_unrecognized_failure_handler_is_rejected_at_codegen(self, transpile):
+        # Only a "skip..." prefix is implemented; any other phrase parses
+        # but would silently do nothing, so it must be a compile error too.
+        with pytest.raises(CodegenError, match="on failure"):
+            transpile(
+                "agent A { step f(x: string) -> string { return x } } "
+                "pipeline P { use A A.f -> A.f on failure in f: retry twice then fail }"
+            )
+
+    def test_timeout_emits_wait_for(self, transpile):
+        out = transpile(
+            "agent A { step f(x: string) -> string { return x } } "
+            "pipeline P { timeout: 5s use A A.f -> A.f }"
+        )
+        assert "asyncio.wait_for(self._orchestrate(initial_input), timeout=5.0)" in out
+
+    def test_budget_handler_emits_except_budget_exceeded(self, transpile):
+        out = transpile(
+            "agent A { step f(x: string) -> string { return x } } "
+            "pipeline P { use A A.f -> A.f "
+            "on budget exceeded: finish current item then stop }"
+        )
+        assert "except BudgetExceeded as _e:" in out
+
 
 class TestPipelineEndToEnd:
     @pytest.mark.asyncio
@@ -164,3 +197,54 @@ class TestPipelineEndToEnd:
         result = await pipe.run(initial_input=["a", "b", "c"])
         # Verify gather actually returned a list
         assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_timeout_actually_fires(self, transpile, tmp_path):
+        import asyncio
+        src = (
+            "agent Slow { step wait() -> string { return \"done\" } } "
+            "pipeline P { timeout: 1s use Slow Slow.wait -> Slow.wait }"
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_timeout", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_timeout"] = mod
+        spec.loader.exec_module(mod)
+        pipe = mod.P()
+        # Patch _orchestrate to hang past the 1s timeout instead of editing
+        # generated source — proves run() actually enforces the wait_for.
+        async def _hang(initial_input=None):
+            await asyncio.sleep(10)
+        pipe._orchestrate = _hang
+        pipe.timeout_seconds = 0.05
+        with pytest.raises(asyncio.TimeoutError):
+            await pipe.run()
+
+    @pytest.mark.asyncio
+    async def test_budget_handler_logs_and_reraises(self, transpile, tmp_path, capsys):
+        from drift.runtime import BudgetExceeded
+        src = (
+            "agent A { step f() -> string { return \"x\" } } "
+            "pipeline P { use A A.f -> A.f "
+            "on budget exceeded: finish current item then stop }"
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_budget", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_budget"] = mod
+        spec.loader.exec_module(mod)
+        pipe = mod.P()
+
+        async def _blow_budget(initial_input=None):
+            raise BudgetExceeded("over limit")
+        pipe._orchestrate = _blow_budget
+
+        with pytest.raises(BudgetExceeded):
+            await pipe.run()
+        assert "finish current item then stop" in capsys.readouterr().out

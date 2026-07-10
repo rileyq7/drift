@@ -222,8 +222,19 @@ class CodeGenerator:
             )
         else:
             self.emit_line("self.budget = None")
+        if pipe.schedule:
+            # `schedule:` needs an external cron/daemon loop to mean anything
+            # — `run()` only ever executes once per call. Storing the string
+            # and never reading it again would silently look configured while
+            # doing nothing, so refuse it instead.
+            raise CodegenError(
+                f"pipeline {pipe.name!r} declares schedule: {pipe.schedule!r}, "
+                "which is not implemented — it parses but nothing drives it "
+                "(no scheduler/daemon exists; `run()` only executes once per "
+                "call). Drive scheduling externally (cron, a task queue) "
+                "calling `drift run` instead."
+            )
         self.emit_line(f"self.timeout_seconds = {pipe.timeout_seconds!r}")
-        self.emit_line(f"self.schedule = {pipe.schedule!r}")
         if not pipe.use_agents and not pipe.budget_config:
             self.emit_line("pass")
         self.dedent()
@@ -236,11 +247,36 @@ class CodeGenerator:
             # for orchestration glue like `compile_and_send`.
             self.gen_inline_step(step)
 
-        # The run() coroutine — the actual orchestration.
+        # The run() coroutine — a thin wrapper enforcing timeout/budget-handler
+        # policy around the actual orchestration in _orchestrate().
         self.emit_line("")
         self.emit_line("async def run(self, initial_input=None):")
         self.indent()
         self.emit_line('"""Execute the pipeline. Returns the last node\'s output."""')
+        if pipe.timeout_seconds:
+            self.emit_line(
+                f"return await asyncio.wait_for(self._orchestrate(initial_input), "
+                f"timeout={pipe.timeout_seconds!r})"
+            )
+        elif pipe.budget_handler:
+            self.emit_line("try:")
+            self.indent()
+            self.emit_line("return await self._orchestrate(initial_input)")
+            self.dedent()
+            self.emit_line("except BudgetExceeded as _e:")
+            self.indent()
+            self.emit_line(
+                f'print(f"  ⚠  budget exceeded ({pipe.budget_handler!r}): {{_e}}")'
+            )
+            self.emit_line("raise")
+            self.dedent()
+        else:
+            self.emit_line("return await self._orchestrate(initial_input)")
+        self.dedent()  # end of run()
+
+        self.emit_line("")
+        self.emit_line("async def _orchestrate(self, initial_input=None):")
+        self.indent()
         self.emit_line("results = {}")
         self.emit_line("_prev = initial_input")
 
@@ -260,7 +296,7 @@ class CodeGenerator:
             produced.add(edge.to_node)
 
         self.emit_line("return _prev")
-        self.dedent()  # end of run()
+        self.dedent()  # end of _orchestrate()
 
         # Helper: call a node with _prev only if it accepts an argument.
         # Indent level here is class-body (one above run).
@@ -301,7 +337,21 @@ class CodeGenerator:
         """Emit code that runs `to_node` with `_prev` as input."""
         callable_expr = self._pipeline_node_callable(edge.to_node, pipe)
         target_step_name = edge.to_node.split(".")[-1]
-        skip_on_failure = pipe.failure_handlers.get(target_step_name, "").startswith("skip")
+        handler = pipe.failure_handlers.get(target_step_name, "")
+        skip_on_failure = handler.startswith("skip")
+        if handler and not skip_on_failure:
+            # `_read_handler_phrase` accepts ANY words after the colon — only
+            # a "skip..." prefix is actually implemented. Anything else
+            # (e.g. "retry twice then fail", "notify oncall") would silently
+            # do nothing rather than the described recovery, so refuse it
+            # instead of compiling a no-op handler.
+            raise CodegenError(
+                f"on failure in {target_step_name}: {handler!r} is not "
+                "implemented — only `on failure in <step>: skip ...` is "
+                "wired up (it wraps that node in try/except and continues "
+                "the pipeline). Any other phrase parses but would silently "
+                "do nothing, so it's rejected instead."
+            )
 
         if edge.op == "->":
             if skip_on_failure:
