@@ -74,12 +74,30 @@ class TestRestForm:
         assert "companies_house = _companies_house_RestTool()" in out
 
     def test_bare_string_auth_works(self, parse_ast):
-        # `auth: "static-token"` should parse too (dev-only mode).
+        # `auth: "static-token"` should parse too (dev-only mode) — and, unlike
+        # `auth: env(...)`, must be stored as the literal value, not an env
+        # var *name* to look up. These used to share one field (auth_env),
+        # so a literal token silently became `os.environ.get("<the token>")`
+        # → None → every request went out with no Authorization header.
         t = parse_ast(
             'tool t { endpoint: "x" auth: "abc" '
             'action ping() -> string { GET "/" } }'
         ).declarations[0]
-        assert t.auth_env == "abc"
+        assert t.auth_literal == "abc"
+        assert t.auth_env == ""
+
+    def test_bare_string_auth_sends_literal_not_env_lookup(self, transpile):
+        out = transpile(
+            'tool t { endpoint: "x" auth: "abc" '
+            'action ping() -> string { GET "/" } }'
+        )
+        assert "auth_literal = 'abc'" in out
+        assert 'return {"Authorization": f"Bearer {self.auth_literal}"}' in out
+
+    def test_env_auth_still_looks_up_env_var(self, transpile):
+        out = transpile(self.REST)
+        assert "auth_env = 'CH_KEY'" in out
+        assert "auth_literal = None" in out
 
     def test_all_http_methods_accepted(self, parse_ast):
         for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]:

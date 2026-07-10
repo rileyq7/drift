@@ -341,7 +341,7 @@ class Parser:
                         self.eat(TT.RPAREN)
                     else:
                         # Allow a bare string for static auth tokens (dev only)
-                        tool.auth_env = self.eat(TT.STRING).value
+                        tool.auth_literal = self.eat(TT.STRING).value
                 elif t.type == TT.IDENT and t.value == 'action':
                     tool.actions.append(self._parse_tool_action())
                 else:

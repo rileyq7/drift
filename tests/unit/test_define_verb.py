@@ -131,3 +131,51 @@ class TestRuntimeRegistration:
         result = await a.intent(verb="tag", input_data="hello")
         # Mock provider returns mock fields for the dataclass.
         assert isinstance(result, Tag)
+
+    @pytest.mark.asyncio
+    async def test_temperature_reaches_provider_call(self):
+        # `define verb { temperature: N }` used to be stored in CUSTOM_VERBS
+        # and never read again — every call went out at the provider's
+        # default temperature regardless of what was declared. Now it must
+        # actually reach provider.call().
+        from drift.runtime import register_custom_verb, Agent, ModelRouter, Budget
+
+        register_custom_verb(name="mood", prompt="Be moody.", temperature=0.9)
+
+        class _RecordingProvider:
+            def __init__(self):
+                self.received_temperature = "UNSET"
+
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                self.received_temperature = temperature
+                return ("ok", 1, 1)
+
+        a = Agent(name="M", model=ModelRouter(), budget=Budget())
+        stub = _RecordingProvider()
+        a._provider_for = lambda model_name: stub
+
+        await a.intent(verb="mood", input_data="hi")
+        assert stub.received_temperature == 0.9
+
+    @pytest.mark.asyncio
+    async def test_unset_temperature_passes_none(self):
+        from drift.runtime import register_custom_verb, Agent, ModelRouter, Budget
+
+        register_custom_verb(name="plain", prompt="Just answer.")
+
+        class _RecordingProvider:
+            def __init__(self):
+                self.received_temperature = "UNSET"
+
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                self.received_temperature = temperature
+                return ("ok", 1, 1)
+
+        a = Agent(name="P", model=ModelRouter(), budget=Budget())
+        stub = _RecordingProvider()
+        a._provider_for = lambda model_name: stub
+
+        await a.intent(verb="plain", input_data="hi")
+        assert stub.received_temperature is None

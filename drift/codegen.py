@@ -435,14 +435,18 @@ class CodeGenerator:
         self.indent()
         self.emit_line(f'"""REST tool adapter generated from a `tool` block."""')
         self.emit_line(f"endpoint = {tool.endpoint!r}")
-        if tool.auth_env:
-            self.emit_line(f"auth_env = {tool.auth_env!r}")
-        else:
-            self.emit_line("auth_env = None")
+        self.emit_line(f"auth_env = {tool.auth_env!r}" if tool.auth_env else "auth_env = None")
+        self.emit_line(
+            f"auth_literal = {tool.auth_literal!r}" if tool.auth_literal else "auth_literal = None"
+        )
         self.emit_line("")
         self.emit_line("def _auth_header(self):")
         self.indent()
         self.emit_line("import os")
+        self.emit_line("if self.auth_literal:")
+        self.indent()
+        self.emit_line('return {"Authorization": f"Bearer {self.auth_literal}"}')
+        self.dedent()
         self.emit_line('if not self.auth_env: return {}')
         self.emit_line('token = os.environ.get(self.auth_env)')
         self.emit_line('return {"Authorization": f"Bearer {token}"} if token else {}')

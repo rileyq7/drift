@@ -484,10 +484,10 @@ define verb evaluate {
 }
 ```
 Fields (all optional except where logic requires them):
-- `pattern` — the call-site shape, used by the parser to validate verb invocations.
+- `pattern` — **documentation only.** Written to make the call-site shape readable at the definition site; not validated against actual call sites anywhere. A call that doesn't match the declared pattern still works (or fails) exactly as if `pattern` weren't there.
 - `prompt` — the system prompt sent to the LLM.
 - `output` — the default output type when the call site omits `as`.
-- `temperature` — sampling temperature for this verb's LLM call.
+- `temperature` — sampling temperature for this verb's LLM call. Passed through to the provider request; omitted (provider default applies) when left at 0/unset.
 
 Once declared, `evaluate` works like any built-in intent verb. Custom verbs use the same clause keywords (`as`, `from`, `against`, etc.).
 

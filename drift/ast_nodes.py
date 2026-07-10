@@ -137,7 +137,8 @@ class ToolDecl:
     kind: str = ""           # "mcp" | "python" | "rest"
     source: str = ""         # URL (mcp) or "module:fn" (python)
     endpoint: str = ""       # REST base URL
-    auth_env: str = ""       # env var name for auth header
+    auth_env: str = ""       # `auth: env("VAR_NAME")` — env var name for auth header
+    auth_literal: str = ""   # `auth: "token"` — static dev token, used as-is
     actions: list = field(default_factory=list)  # list of ToolAction
 
 

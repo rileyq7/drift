@@ -940,8 +940,11 @@ class MockProvider:
     """
 
     async def call(self, model: str, system: str, prompt: str,
-                   output_schema=None) -> tuple[str, int, int]:
-        """Returns (response_text, tokens_in, tokens_out)"""
+                   output_schema=None, temperature: float | None = None) -> tuple[str, int, int]:
+        """Returns (response_text, tokens_in, tokens_out).
+
+        temperature is accepted for interface parity with the real providers
+        but has no effect — the mock doesn't call a real model."""
         tokens_in = len(prompt.split()) * 2  # rough estimate
         await asyncio.sleep(0.1)  # simulate latency
 
@@ -1028,10 +1031,19 @@ class AnthropicProvider:
             )
 
     async def call(self, model: str, system: str, prompt: str,
-                   output_schema=None) -> tuple[str, int, int]:
+                   output_schema=None, temperature: float | None = None) -> tuple[str, int, int]:
         import httpx
 
         api_model = MODEL_REGISTRY.get(model, model)
+
+        payload = {
+            "model": api_model,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "system": system,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
 
         try:
             async with httpx.AsyncClient() as client:
@@ -1042,12 +1054,7 @@ class AnthropicProvider:
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
-                    json={
-                        "model": api_model,
-                        "max_tokens": MAX_OUTPUT_TOKENS,
-                        "system": system,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
+                    json=payload,
                     timeout=60.0,
                 )
         except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPError) as e:
@@ -1131,7 +1138,7 @@ class OpenAIProvider:
         return None
 
     async def call(self, model: str, system: str, prompt: str,
-                   output_schema=None) -> tuple[str, int, int]:
+                   output_schema=None, temperature: float | None = None) -> tuple[str, int, int]:
         import httpx
 
         # Strip a leading "openai/" if a user wrote it that way.
@@ -1146,6 +1153,8 @@ class OpenAIProvider:
                 {"role": "user", "content": prompt},
             ],
         }
+        if temperature is not None:
+            payload["temperature"] = temperature
         # Strict mode: when the call has a dataclass schema, attach JSON Schema
         # so OpenAI forces the response to match. Drops the "model returned
         # almost-JSON" failure mode entirely.
@@ -1448,6 +1457,10 @@ class Agent:
         # didn't override it (no `as` clause), inherit it.
         if output_schema is None and verb in CUSTOM_VERBS:
             output_schema = CUSTOM_VERBS[verb].get("output_schema")
+        # 0 means "unspecified" (see CUSTOM_VERBS docstring) — omit rather
+        # than pass a literal 0.0, which would force greedy/deterministic
+        # sampling instead of leaving the provider's own default in effect.
+        temperature = CUSTOM_VERBS.get(verb, {}).get("temperature") or None
 
         # Build prompt first so we have a token estimate for the router.
         system_prompt, user_prompt = build_intent_prompt(
@@ -1486,7 +1499,8 @@ class Agent:
         print(f"  ▸  {verb}() via {model_name}")
         try:
             response_text, tokens_in, tokens_out = await provider.call(
-                model_name, system_prompt, user_prompt, output_schema
+                model_name, system_prompt, user_prompt, output_schema,
+                temperature=temperature,
             )
         except BaseException:
             # Release the reservation on any failure so a retry/fallback isn't
