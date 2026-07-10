@@ -7,8 +7,61 @@ This is a deterministic, mechanical translation. No AI involved.
 The same .drift input ALWAYS produces the same .py output.
 """
 
+import ast as py_ast
 import re
 from . import ast_nodes as ast
+
+
+class CodegenError(Exception):
+    """Raised when a .drift construct cannot be safely lowered to Python."""
+
+
+def _py_str_literal(value: str) -> str:
+    """Emit a safe double-quoted Python string literal for `value`.
+
+    Uses repr() to escape backslashes/quotes/control chars (closing the
+    injection hole), then normalizes to double quotes to match the rest of
+    codegen's output style. This keeps generated source stable and readable
+    while making it impossible for `value` to break out of its quotes.
+    """
+    r = repr(value)
+    if r[0] == "'":
+        # repr chose single quotes: unescape any \' then escape bare ".
+        body = r[1:-1].replace("\\'", "'").replace('"', '\\"')
+        return '"' + body + '"'
+    return r
+
+
+def _validate_interp_expr(expr_src: str) -> None:
+    """Reject interpolation bodies that could escape the intended semantics.
+
+    Drift string interpolation is documented to allow ordinary expressions
+    (member access, method calls, arithmetic). It is NOT an arbitrary-code
+    channel: dunder access (`__import__`, `__class__`, ...) is the standard
+    sandbox-escape vector, so we forbid any name — attribute or bare — that is
+    dunder-shaped. Syntactically invalid bodies are rejected too, rather than
+    emitted verbatim into the f-string.
+    """
+    stripped = expr_src.strip()
+    if not stripped:
+        raise CodegenError("empty interpolation `{}` in string")
+    try:
+        tree = py_ast.parse(stripped, mode='eval')
+    except SyntaxError as e:
+        raise CodegenError(
+            f"invalid interpolation expression {stripped!r}: {e.msg}"
+        )
+    for node in py_ast.walk(tree):
+        name = None
+        if isinstance(node, py_ast.Attribute):
+            name = node.attr
+        elif isinstance(node, py_ast.Name):
+            name = node.id
+        if name and name.startswith('__') and name.endswith('__'):
+            raise CodegenError(
+                f"interpolation expression {stripped!r} references {name!r}; "
+                "dunder access is not allowed inside string interpolation"
+            )
 
 
 # Map Drift types to Python/Pydantic types
@@ -724,18 +777,11 @@ class CodeGenerator:
         elif isinstance(stmt, ast.ForgetStmt):
             self.gen_forget(stmt)
         elif isinstance(stmt, ast.ExprStmt):
-            expr_code = self.gen_expr(stmt.expr)
-            if 'await' in expr_code:
-                self.emit_line(expr_code)
-            else:
-                self.emit_line(expr_code)
+            self.emit_line(self.gen_expr(stmt.expr))
 
     def gen_let(self, stmt: ast.LetStmt):
         expr = self.gen_expr(stmt.value)
-        if 'await' in expr:
-            self.emit_line(f"{stmt.name} = {expr}")
-        else:
-            self.emit_line(f"{stmt.name} = {expr}")
+        self.emit_line(f"{stmt.name} = {expr}")
 
     def gen_return(self, stmt: ast.ReturnStmt):
         if stmt.value is None:
@@ -966,24 +1012,37 @@ class CodeGenerator:
 
     def gen_match(self, stmt: ast.MatchStmt):
         target = self.gen_expr(stmt.target)
-        first = True
-        for arm in stmt.arms:
-            if arm.is_default:
-                self.emit_line("else:")
-            elif first:
-                pattern = self.gen_expr(arm.pattern)
-                self.emit_line(f"if {target} == {pattern}:")
-                first = False
-            else:
-                pattern = self.gen_expr(arm.pattern)
-                self.emit_line(f"elif {target} == {pattern}:")
+        # Emit all pattern arms first, then the default as a trailing `else:`,
+        # regardless of source order — otherwise a default arm written before a
+        # pattern arm would emit `else:` before the opening `if` (SyntaxError).
+        pattern_arms = [a for a in stmt.arms if not a.is_default]
+        default_arms = [a for a in stmt.arms if a.is_default]
 
+        def emit_body(arm):
             self.indent()
             for s in arm.body:
                 self.gen_statement(s)
             if not arm.body:
                 self.emit_line("pass")
             self.dedent()
+
+        for idx, arm in enumerate(pattern_arms):
+            pattern = self.gen_expr(arm.pattern)
+            kw = "if" if idx == 0 else "elif"
+            self.emit_line(f"{kw} {target} == {pattern}:")
+            emit_body(arm)
+
+        for arm in default_arms:
+            # If there were no pattern arms, `else` has nothing to attach to;
+            # emit the body unconditionally instead.
+            if pattern_arms:
+                self.emit_line("else:")
+                emit_body(arm)
+            else:
+                for s in arm.body:
+                    self.gen_statement(s)
+                if not arm.body:
+                    self.emit_line("pass")
 
     # ─── Expressions ───────────────────────────────────────────────
 
@@ -1009,8 +1068,8 @@ class CodeGenerator:
             return expr.name
         elif isinstance(expr, ast.StringLit):
             if expr.has_interpolation:
-                return f'f"{expr.value}"'
-            return f'"{expr.value}"'
+                return self._gen_fstring(expr.value)
+            return _py_str_literal(expr.value)
         elif isinstance(expr, ast.NumberLit):
             if expr.value == int(expr.value):
                 return str(int(expr.value))
@@ -1037,6 +1096,72 @@ class CodeGenerator:
             return "None"
         else:
             return repr(expr)
+
+    def _gen_fstring(self, value: str) -> str:
+        """Emit a Python f-string from a Drift interpolated string.
+
+        The `{...}` placeholders are intentional interpolation and pass through
+        as f-string expressions. Everything outside the braces is literal text
+        and must be escaped so it can never break out of the surrounding quotes
+        (a raw `"` or `\\` in the literal portion would otherwise terminate the
+        f-string and let arbitrary Python follow).
+        """
+        parts = []  # (is_literal, text)
+        i = 0
+        n = len(value)
+        buf = []
+        while i < n:
+            ch = value[i]
+            if ch == '{':
+                # Escaped literal brace: `{{` stays literal.
+                if i + 1 < n and value[i + 1] == '{':
+                    buf.append('{')
+                    i += 2
+                    continue
+                # Start of an interpolation; scan to the matching close brace,
+                # tracking nesting so `{d["k"]}`-style bodies survive.
+                if buf:
+                    parts.append((True, ''.join(buf)))
+                    buf = []
+                depth = 1
+                j = i + 1
+                while j < n and depth > 0:
+                    if value[j] == '{':
+                        depth += 1
+                    elif value[j] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    j += 1
+                expr_src = value[i + 1:j]
+                _validate_interp_expr(expr_src)
+                parts.append((False, expr_src))
+                i = j + 1
+            elif ch == '}':
+                # Escaped literal brace: `}}` stays literal.
+                if i + 1 < n and value[i + 1] == '}':
+                    buf.append('}')
+                    i += 2
+                    continue
+                buf.append('}')
+                i += 1
+            else:
+                buf.append(ch)
+                i += 1
+        if buf:
+            parts.append((True, ''.join(buf)))
+
+        pieces = []
+        for is_literal, text in parts:
+            if is_literal:
+                # Reuse the safe double-quoted literal, drop its outer quotes,
+                # and re-double braces so the f-string parser keeps them literal.
+                inner = _py_str_literal(text)[1:-1]
+                inner = inner.replace('{', '{{').replace('}', '}}')
+                pieces.append(inner)
+            else:
+                pieces.append('{' + text + '}')
+        return 'f"' + ''.join(pieces) + '"'
 
     def gen_binop(self, expr: ast.BinOp) -> str:
         op = expr.op
