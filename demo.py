@@ -35,10 +35,16 @@ def section(title):
 
 async def demo():
     # ── Step 1: Read the source ──
+    # These are the golden examples covered by tests/golden/test_transpile_examples.py
+    # (EXAMPLE_NAMES). Keep this list in sync so `python demo.py` regenerates
+    # every committed .py golden.
     drift_files = [
         "examples/hello.drift",
         "examples/inbox_sorter.drift",
         "examples/grant_checker.drift",
+        "examples/confident_demo.drift",
+        "examples/inbox_triage_live.drift",
+        "examples/grant_checker_compare.drift",
     ]
 
     for drift_file in drift_files:
@@ -136,13 +142,14 @@ def main():
     asyncio.run(demo())
 
     section("DONE")
-    print("  Three .drift files transpiled to .py files.")
+    print("  All example .drift files transpiled to .py files.")
     print("  One agent executed end-to-end with cost tracking.")
     print()
     print("  Next steps:")
     print("    • Set ANTHROPIC_API_KEY for real LLM calls")
-    print("    • Try: python drift_cli.py transpile examples/hello.drift")
-    print("    • Try: python drift_cli.py run examples/grant_checker.drift --step evaluate")
+    print("    • Try: drift transpile examples/hello.drift")
+    print("    • Try: drift run examples/grant_checker.drift --step evaluate")
+    print("      (or, without installing: python -m drift.cli transpile examples/hello.drift)")
     print()
 
 

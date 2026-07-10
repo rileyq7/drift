@@ -70,7 +70,7 @@ async def main() -> None:
     agent1 = GrantChecker()
     score1 = await agent1.evaluate(**RUN1)
     # consolidate manually so the demo shows the state Dendric would be in
-    # after the agent run boundary. (When run via drift_cli.py this is
+    # after the agent run boundary. (When run via `drift run` this is
     # automatic via run_agent.)
     if hasattr(agent1.memory, "consolidate"):
         agent1.memory.consolidate()

@@ -28,9 +28,15 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
-dendric = ["dendric", "psycopg2-binary", "pgvector", "openai>=1.0"]
+# The Dendric memory engine itself is NOT on PyPI and has no installable
+# package — it is loaded from a locally-cloned checkout via sys.path
+# injection (see drift/runtime/dendric_store.py, DENDRIC_HOME). So the
+# `dendric` extra only installs the Python libraries the DendricStore
+# adapter needs (Postgres + pgvector + embeddings); clone Dendric
+# separately and point DENDRIC_HOME/DATABASE_URL at it.
+dendric = ["psycopg2-binary", "pgvector", "openai>=1.0"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
-all = ["mcp>=1.0", "dendric", "psycopg2-binary", "pgvector", "openai>=1.0"]
+all = ["mcp>=1.0", "psycopg2-binary", "pgvector", "openai>=1.0"]
 
 [project.scripts]
 drift = "drift.cli:main"

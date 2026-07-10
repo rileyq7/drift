@@ -22,12 +22,12 @@ agent GrantChecker {
     if scored is confident {
       return scored.value
     }
-    escalate to human review
+    fail "low confidence — needs human review"
   }
 }
 ```
 
-Six top-level forms:
+Seven top-level forms:
 
 | Declaration | Purpose |
 |---|---|
@@ -64,11 +64,11 @@ let scored = rate company against criteria as confident<FitScore>
 if scored is confident {
   return scored.value
 } otherwise {
-  escalate to human review
+  fail "low confidence — needs human review"
 }
 ```
 
-`is confident` tests against the agent's `min_confidence` threshold (default 0.85). Run the cheap model when sure, escalate when not.
+`is confident` tests against the agent's `min_confidence` threshold (default 0.85). Run the cheap model when sure, `fail` (raises `StepFailed`) or return a sentinel schema value when not. There is no `escalate` keyword — see [gotchas](./gotchas.md#there-is-no-escalate).
 
 ## Model routing
 
@@ -191,7 +191,7 @@ pipeline Triage {
 }
 ```
 
-Operators: `->` sequential, `=>` strict sequential, `~>` side-effect (output discarded), `|>` final stage.
+Operators (current behavior): `->` sequential; `=>` **parallel fan-out** — the upstream node's output must be iterable and the downstream node runs concurrently over each item via `asyncio.gather`. `~>` (conditional) and `|>` (stream) are **parsed but not yet honored** — both currently compile to a plain sequential call with a warning comment, so treat them as experimental.
 
 ## See also
 

@@ -45,6 +45,10 @@ checkpoints/
 # Logs
 *.log
 
+# Local scratch / drafts — not part of the package, don't commit accidentally
+compression_training_data.jsonl
+hn_self_reply.md
+
 # VS Code extension build artifacts
 *.vsix
 vscode-drift/node_modules/

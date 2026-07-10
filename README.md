@@ -9,6 +9,14 @@
 **An intent-based language for agentic systems.** Write your agent in English-shaped blocks, run it as async Python.
 
 ```drift
+schema EmailAnalysis {
+  subject: string
+  priority: one of "urgent", "normal", "low"
+  category: one of "billing", "support", "sales", "spam", "personal"
+  summary: string
+  suggested_action: string
+}
+
 agent InboxTriage {
   model: "gpt-5.4-nano"
   budget: $0.10 per run
@@ -29,7 +37,7 @@ agent InboxTriage {
 }
 ```
 
-A full agent: model choice, budget, parallel fan-out, structured classification, conditional output. The transpiler emits async Python that runs on Drift's thin runtime. Live against OpenAI: 5 emails, 1.82s, $0.0092, returned 5 typed dataclasses.
+A full agent: model choice, budget, parallel fan-out, structured classification, conditional output. The transpiler emits async Python that runs on Drift's thin runtime. In one example run against OpenAI, 5 emails classified in ~1.8s for under a cent, returning 5 typed dataclasses — a single anecdotal measurement, not a benchmark; your latency and cost will vary by model and input.
 
 ## Install
 
@@ -61,7 +69,9 @@ No API key required. Drift falls back to a mock provider so you see something wo
 drift new <name>          Scaffold a starter project
 drift run <file.drift>    Transpile and execute
 drift check <file.drift>  Validate syntax
+drift fmt <file.drift>    Format in place (--check for CI, --stdout to preview)
 drift transpile <file>    Emit Python (use -o to write to a file)
+drift mcp                 Run as an MCP stdio server (drift_check / transpile / run)
 drift lex / parse         Debug tooling
 ```
 
@@ -70,10 +80,10 @@ drift lex / parse         Debug tooling
 - **`agent`**: top-level unit. Has `model`, `budget`, `state`, `memory`, and `step`s.
 - **`step`**: typed sub-procedure. Body is a sequence of declarative statements.
 - **Intent verbs**: `summarize`, `extract`, `classify`, `translate`, `match`, `generate`, etc. Each one becomes a typed LLM call.
-- **`confident<T>`**: confidence-gated branching. Run the cheap path when sure, escalate when not.
+- **`confident<T>`**: confidence-gated branching. Run the cheap path when sure, `fail` or hand off to a stronger path when not. (There is no `escalate` keyword.)
 - **`model { … }`**: multi-provider routing with `prefer`, `fallback`, `upgrade when confidence < 0.7`, and `stream "fast" then "slow"`.
-- **`tool name from python|mcp|rest`**: declare external tools. MCP runs against the official SDK.
-- **`pipeline`**: composable flow with `->`, `=>`, `~>`, `|>` operators.
+- **`tool`**: declare external tools. `tool name from mcp "..."` or `tool name from python "mod:fn"`; REST tools use the inline block form (`tool name { endpoint: ... action ... }`) — there is no `from rest`. MCP runs against the official SDK.
+- **`pipeline`**: composable flow. `->` is sequential and `=>` is parallel fan-out (`asyncio.gather` over items); `~>` (conditional) and `|>` (stream) parse but aren't honored yet.
 - **`for each x in xs parallel`**: `asyncio.gather` underneath.
 - **`attempt / recover`**: structured error handling with retry, fail, and named arms.
 - **`memory`**: short-term scratchpad or durable backend (Dendric). `remember`, `recall`, `deja_vu`, `forget`.
@@ -97,13 +107,13 @@ See [`examples/`](./examples) for working `.drift` programs and their generated 
 - `confident_demo.drift`: `confident<T>` branching
 - `grant_checker.drift`: end-to-end intent + structured return
 - `inbox_sorter.drift`: `for each … parallel` triage
-- `inbox_triage_live.drift`: the canonical 30-line demo (real-LLM verified: 5 emails, 1.82s, $0.0092)
+- `inbox_triage_live.drift`: the canonical 30-line demo (runs against a real LLM; one example run did 5 emails in ~1.8s for under a cent — anecdotal, not a benchmark)
 - `grant_checker_with_memory.drift`: Dendric-backed long-term memory
 - `grant_checker_compare.drift`: citation-proof memory. Run 2's LLM reasoning cites Run 1 by name and makes side-by-side comparisons
 
 ## Status
 
-Alpha. Language surface is stable, runtime works, 352/352 tests passing. OpenAI + Anthropic providers with strict-JSON output, MCP tools, Dendric memory, source-mapped runtime errors. Voice primitives parse but adapters aren't wired yet. Type system beyond `confident<T>` is on the roadmap.
+Alpha. Language surface is stable, runtime works, 352/352 tests passing. OpenAI + Anthropic providers, MCP tools, Dendric memory, source-mapped runtime errors. Structured output uses provider-side strict JSON Schema on OpenAI; the Anthropic provider relies on schema-in-prompt plus validation-and-retry (it does not send a JSON Schema). Type system beyond `confident<T>` is on the roadmap.
 
 ## License
 

@@ -16,6 +16,11 @@
   "repository": {
     "comments": {
       "patterns": [
+        {
+          "name": "comment.block.drift",
+          "begin": "\\{-",
+          "end": "-\\}"
+        },
         { "match": "--.*$", "name": "comment.line.double-dash.drift" }
       ]
     },
@@ -39,12 +44,16 @@
           "name": "keyword.declaration.drift"
         },
         {
-          "match": "\\b(if|else|let|return|respond|escalate|for|each|in|parallel|cached|manual|silent|while)\\b",
+          "match": "\\b(if|otherwise|let|return|respond|for|each|in|parallel|cached|manual|silent)\\b",
           "name": "keyword.control.drift"
         },
         {
-          "match": "\\b(attempt|recover|retry|fail|on)\\b",
+          "match": "\\b(attempt|recover|retry|fail|error|on)\\b",
           "name": "keyword.control.exception.drift"
+        },
+        {
+          "match": "\\b(and|or|not|is)\\b",
+          "name": "keyword.operator.logical.drift"
         },
         {
           "match": "\\b(remember|recall|deja_vu|forget|tagged|older|than|where|match)\\b",
@@ -55,11 +64,11 @@
           "name": "keyword.other.routing.drift"
         },
         {
-          "match": "\\b(python|mcp|rest|dendric)\\b",
+          "match": "\\b(python|mcp|dendric)\\b",
           "name": "support.type.drift"
         },
         {
-          "match": "\\b(true|false|null)\\b",
+          "match": "\\b(true|false)\\b",
           "name": "constant.language.drift"
         }
       ]
@@ -79,8 +88,12 @@
     "types": {
       "patterns": [
         {
-          "match": "\\b(string|int|float|bool|list|dict|any)\\b",
+          "match": "\\b(string|number|bool|document|currency|duration|timestamp|list|map|confident)\\b",
           "name": "support.type.builtin.drift"
+        },
+        {
+          "match": "\\b(one|of|optional|between|quality)\\b",
+          "name": "keyword.other.constraint.drift"
         },
         {
           "match": "\\b([A-Z][a-zA-Z0-9_]*)\\b",
@@ -91,7 +104,7 @@
     "literals": {
       "patterns": [
         {
-          "match": "\\$[0-9]+(\\.[0-9]+)?",
+          "match": "[£$€][0-9]+(\\.[0-9]+)?",
           "name": "constant.numeric.currency.drift"
         },
         {

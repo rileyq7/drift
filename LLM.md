@@ -10,7 +10,7 @@ If a user asks for something not described here, refuse to invent syntax. Sugges
 
 A `.drift` file is a sequence of declarations, separated by blank lines. Order doesn't matter for `agent`/`schema`/`config`/`tool`/`pipeline`/`define`, but every `define verb` must appear **before** any use of that verb.
 
-Six declaration forms:
+Seven declaration forms:
 
 ```drift
 config { ... }              -- project metadata
@@ -66,7 +66,7 @@ The lexer distinguishes them. Using PascalCase where snake_case is expected (or 
 
 Primitive: `string`, `int`, `float`, `number`, `bool`.
 
-Generic containers: `list<T>`, `map<K, V>` (not `dict`), `optional<T>`. No spaces inside the `<...>`. The parser does not currently accept `dict<...>`, `set<...>`, or `tuple<...>` — use `map<...>` for key/value pairs and `list<...>` for everything else.
+Generic containers: `list<T>`, `map<K, V>` (not `dict`). No spaces inside the `<...>`. There is no `optional<T>` generic — that's a parse error. The parser does not currently accept `dict<...>`, `set<...>`, `tuple<...>`, or `optional<...>` — use `map<...>` for key/value pairs and `list<...>` for everything else. To mark a field nullable, use the trailing `optional` modifier on a schema field (see below), not a generic wrapper.
 
 Schema-defined types: any `PascalCase` name declared via `schema Name { ... }`.
 
@@ -76,6 +76,8 @@ Refinement clauses (schemas and return types only):
 - `number between A and B`
 - `one of "a", "b", "c"`
 
+Optional fields: append the `optional` modifier **after** the type in a schema field (`note: string optional`). Codegen emits `Optional[str] = None`. This is the only way to make a field nullable — there is no `optional<T>` type.
+
 Example:
 ```drift
 schema FitScore {
@@ -83,6 +85,7 @@ schema FitScore {
   recommendation: one of "strong fit", "possible fit", "weak fit", "no fit"
   confidence: number between 0 and 1
   tags: list<string>
+  note: string optional
 }
 ```
 
@@ -228,11 +231,9 @@ step name(p1: T1, p2: T2) -> ReturnType {
 }
 ```
 
-Modifiers (prefix the `step` keyword, mutually exclusive):
-- `cached step` — memoize on input args
-- `parallel step` — eligible for parallel pipeline scheduling
-- `manual step` — only runs when explicitly requested via `--step`
-- `silent step` — suppress `respond` output
+Modifiers (prefix the `step` keyword, mutually exclusive): `cached`, `parallel`, `manual`, `silent`.
+
+> **Not yet enforced.** All four modifiers parse and are threaded to the step decorator, but the runtime never reads them — they are currently **no-ops**. `cached` does not memoize, `manual` does not gate on `--step`, `silent` does not suppress `respond`, and `parallel` does nothing at the step level (real concurrency comes from `for each ... parallel` and the pipeline `=>` operator). Treat these as experimental / reserved syntax until wired up.
 
 A step with no return type returns whatever the last expression evaluates to.
 
@@ -348,7 +349,7 @@ Verbs: `classify`, `extract`, `summarize`, `rate`, `generate`, `rewrite`, `answe
 **Picking the right verb when the output is a schema.** Every verb can produce structured output via `as <Schema>` — the verb mostly biases the LLM's framing:
 - `classify` — assigns categories to input; pick when the result has discrete labels (priority, sentiment, type).
 - `extract` — pulls specific fields out of text; pick when the input is unstructured and the schema's fields name things to find.
-- `rate` / `score` — assigns numeric scores along axes; pick when the schema is numeric-heavy.
+- `rate` — assigns numeric scores along axes; pick when the schema is numeric-heavy. (There is no `score` verb — use `rate`.)
 - `summarize` — condenses text; pick when the result is mostly prose.
 - `generate` — produces new content; pick when nothing in the input maps directly to the output.
 - `answer` — Q&A over a context (`from <docs>`); pick when there's a question + a source.
@@ -442,11 +443,11 @@ pipeline Triage {
 }
 ```
 
-Operators:
-- `->` sequential (default)
-- `=>` strict sequential, no skip-on-empty
-- `~>` side-effect (output discarded)
-- `|>` final stage
+Operators (what codegen actually emits today):
+- `->` sequential (default) — thread the previous node's output into the next.
+- `=>` **parallel fan-out** — the previous node's output must be iterable; the next node runs concurrently over each item via `asyncio.gather`. Not "strict sequential".
+- `~>` conditional — **not yet honored.** Compiles to an unconditional sequential call plus a `# conditional ~> not yet honored; running unconditionally` comment. Treat as experimental.
+- `|>` stream — **not yet honored.** Compiles to a plain sequential call plus a `# stream |> not yet honored; running as sequential` comment. Treat as experimental. (Note: `|>` *inside an expression* is a separate, working function-composition pipe; the not-yet-honored caveat only applies to `|>` as a pipeline edge.)
 
 Each node is a step name (current file's first agent) or `Agent.step` (any agent). Pipelines run via `drift run --pipeline <name>`.
 
@@ -484,16 +485,16 @@ Pulls named declarations into the current file. Path is relative to the importin
 
 ## 15. Standard library imports
 
-Drift ships modules you can import at the top of any file. The actual function names:
+Drift ships modules you can import at the top of any file. Stdlib modules live under the `drift/` namespace — you **must** write the `drift/` prefix. Codegen maps `drift/io` → `from drift.io import ...`; a bare `"io"` would emit `from io import ...` and collide with Python's own stdlib (ImportError). The actual function names:
 
 ```drift
-import { read, write, fetch_url, load_pdf, load_csv } from "io"
-import { email, slack, webhook, push } from "notify"
-import { redact_pii, check_content, sanitize, rate_limit } from "safety"
-import { filter_, sort, group_by, deduplicate, paginate } from "data"
-import { now, wait, deadline, schedule } from "time"
-import { chunk, tokenize, similarity, embed } from "text"
-import { log, trace, metric, cost_report } from "observe"
+import { read, write, fetch_url, load_pdf, load_csv } from "drift/io"
+import { email, slack, webhook, push } from "drift/notify"
+import { redact_pii, check_content, sanitize, rate_limit } from "drift/safety"
+import { filter_, sort, group_by, deduplicate, paginate } from "drift/data"
+import { now, wait, deadline, schedule } from "drift/time"
+import { chunk, tokenize, similarity, embed } from "drift/text"
+import { log, trace, metric, cost_report } from "drift/observe"
 ```
 
 Use any imported function as a normal call inside step bodies. Examples:

@@ -190,15 +190,19 @@ model: "openai/gpt-4o"   -- if you really want explicit
 
 `gpt-*`, `o1`, `o3`, `o4`, `openai/*` → OpenAI. `claude-*`, `anthropic/*` → Anthropic. Anything else → mock provider (with a banner).
 
-## Mock provider is silent only without keys
+## Provider falls back to mock when the matching key is missing
 
 ```drift
--- This will hit mock if no key is set, with a banner. That's fine for dev.
--- But if you have OPENAI_API_KEY set and you pick "claude-sonnet" with no
--- ANTHROPIC_API_KEY, the runtime falls back to OpenAI (which won't recognize
--- the model) → 404. The CLI banner shows "anthropic + openai (auto-routed
--- by model)" only when BOTH keys are set.
+-- Routing is by model family, and the runtime NEVER sends a model to the
+-- wrong provider. If you pick "claude-sonnet" but only OPENAI_API_KEY is
+-- set, the runtime does NOT route to OpenAI — it falls back to the mock
+-- provider (with a banner: "Using mock provider — 'claude-sonnet' needs
+-- ANTHROPIC_API_KEY"). Same the other way: a gpt-* model with no
+-- OPENAI_API_KEY falls back to mock, not to Anthropic.
 ```
+
+So a missing key is never a silent 404 — it downgrades to deterministic mock
+output. To get real calls, set the key that matches the model's family.
 
 ## `forget` predicates are limited
 
@@ -227,5 +231,8 @@ list<string,>
 
 -- RIGHT
 list<string>
-dict<string, int>     -- comma only between multiple params
+map<string, int>      -- key/value pairs use `map`, not `dict`
 ```
+
+Note: the container keyword is `map`, not `dict`. `dict<...>` is a parse
+error — the parser only knows `list<T>` and `map<K, V>`.

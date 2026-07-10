@@ -92,7 +92,7 @@ agent InboxSorter {
 Handle rate limits and budget caps cleanly. Each arm is `<ErrorType> -> <body>`.
 
 ```drift
-import { fetch_url } from "io"
+import { fetch_url } from "drift/io"
 
 agent ResilientFetcher {
   model: "claude-haiku"

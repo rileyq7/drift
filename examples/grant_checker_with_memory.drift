@@ -8,12 +8,12 @@
 --   Run 2: evaluate(MedAI, healthcare grant) → recalls TechCo + dejas
 --
 -- Real run with Dendric (set OPENAI_API_KEY + DATABASE_URL):
---   python drift_cli.py run examples/grant_checker_with_memory.drift \
+--   drift run examples/grant_checker_with_memory.drift \
 --     --step evaluate \
 --     --input '{"company_profile": "TechCo, healthcare AI, 15 employees",
 --               "call_text": "Innovate UK Smart Grants, AI + health focus"}'
 --
---   python drift_cli.py run examples/grant_checker_with_memory.drift \
+--   drift run examples/grant_checker_with_memory.drift \
 --     --step evaluate \
 --     --input '{"company_profile": "MedAI Ltd, drug discovery ML, 8 employees",
 --               "call_text": "Innovate UK Smart Grants, AI + health focus"}'
