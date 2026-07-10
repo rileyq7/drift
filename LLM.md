@@ -148,10 +148,11 @@ model: "claude-haiku"
 model: prefer "claude-sonnet" fallback "gpt-4o"
 ```
 
-**Stream-then (fast preview, slow reasoning):**
+**Stream-then — parses, but not usable from .drift yet:**
 ```drift
 model: stream "claude-haiku" then "claude-sonnet"
 ```
+This is a **compile error** (`CodegenError`), not a working feature. The syntax parses and the runtime has a real `StreamThenRouter.stream_then_call()` that fires both models concurrently and calls a bridge callback — but no `.drift` step-body syntax exists to supply that callback, and generated intent calls never invoke `stream_then_call()` at all. Emitting it silently would behave exactly like `model: default "claude-sonnet"` (no bridge, no speedup, no error), so codegen refuses instead. Usable today only from hand-written Python via `drift.runtime.StreamThenRouter`. Don't suggest this syntax to a user who wants working fast/slow streaming — write `model: default "claude-sonnet"` and note the limitation.
 
 **Block form (full routing):**
 ```drift
@@ -343,6 +344,8 @@ forget memories where temp < 0.2
 ```
 
 `remember` writes; `recall` returns a list of strings (the matched memory contents); `deja_vu` consults Dendric's archive for activations and routes on pattern match; `forget` removes by predicate.
+
+> **Mock backend caveat.** Without a configured Dendric store (`DATABASE_URL` unset — the default, and what every test uses), memory runs against an in-process SQLite mock. Only `forget memories tagged "..."` does anything there — it deletes by tag-substring. `forget memories older than Nd` and `forget memories where temp < N` are silent no-ops against the mock (it tracks no ages or temperature), and `deja_vu` never fires (no archive/sleep-cycle to surface activations). All of this works against a real Dendric backend. If a `.drift` file uses age/temp-based `forget` or `deja_vu` and you need to verify it actually did something, either configure Dendric or check the behavior in `drift/runtime/core.py`'s mock store — don't assume the mock run proved the logic works.
 
 ### Intent expressions
 

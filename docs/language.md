@@ -77,7 +77,6 @@ Three forms, simplest to richest:
 ```drift
 model: "claude-haiku"
 model: prefer "claude-sonnet" fallback "gpt-4o"
-model: stream "claude-haiku" then "claude-sonnet"
 
 model {
   default: "claude-haiku"
@@ -90,6 +89,8 @@ model {
 ```
 
 The runtime picks a provider by model name: `gpt-*`/`o1`/`o3`/`o4` → OpenAI, `claude-*` → Anthropic. With no key set it uses a mock provider (deterministic stub data) so your agent always runs.
+
+`model: stream "fast" then "slow"` also parses but is a **compile error** — the runtime has a real fast/slow bridge router, but no `.drift` syntax can supply its callback, so codegen refuses rather than silently emitting a router that behaves like `default "slow"`. See [`LLM.md`](../LLM.md) for detail.
 
 ## Memory
 

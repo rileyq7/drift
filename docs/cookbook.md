@@ -228,17 +228,12 @@ agent Reviewer {
 }
 ```
 
-## 10. Stream-then for snappy UX
+## 10. Stream-then for snappy UX — not available from .drift yet
 
-Fast preview, slow reasoning. The fast model's tokens stream first, then the slow model's full reasoning replaces them.
-
-```drift
-agent ChatBot {
-  model: stream "claude-haiku" then "claude-sonnet"
-  budget: $0.10 per run
-
-  step respond_to(question: string) -> string {
-    return answer question using "documentation context" as string
-  }
-}
-```
+`model: stream "fast" then "slow"` parses but is a compile error today: the
+runtime has a real concurrent fast/slow bridge (`StreamThenRouter`), but no
+`.drift` syntax can supply its callback, so codegen refuses the declaration
+rather than silently compiling it to a plain `model: default "slow"` with no
+speedup. If you need fast-preview UX today, call
+`drift.runtime.StreamThenRouter.stream_then_call()` directly from
+hand-written Python instead of from a `.drift` step body.

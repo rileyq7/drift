@@ -1,16 +1,26 @@
 """Tests for `model: stream "fast" then "slow"` — temporal model routing.
 
-Three layers:
-  1. Parser sets mode + stream_model + then_model
-  2. Codegen emits StreamThenRouter (not ModelRouter)
-  3. Runtime: stream_then_call fires both concurrently and the bridge
-     callback fires before the reasoning result returns
+Two layers, and a deliberate gap between them:
+  1. Parser sets mode + stream_model + then_model (real).
+  2. Runtime: StreamThenRouter.stream_then_call() fires both models
+     concurrently and the bridge callback fires before the reasoning
+     result returns (real, usable from hand-written Python).
+
+Codegen does NOT wire these together: no Drift step-body syntax exists to
+supply stream_then_call's on_bridge callback, and Agent.intent() (what every
+intent verb goes through) never calls stream_then_call() itself. Emitting a
+StreamThenRouter from `model: stream ... then ...` would therefore silently
+behave exactly like `model: default "<then-model>"` — same model, no bridge,
+no speedup, no error. So codegen rejects the declaration instead
+(TestStreamThenCodegen) rather than emitting a router whose one
+distinguishing method nothing calls.
 """
 import asyncio
 
 import pytest
 
 from drift import ast_nodes as ast
+from drift.codegen import CodegenError
 from drift.runtime import StreamThenRouter
 
 
@@ -60,16 +70,16 @@ class TestStreamThenParse:
 
 
 class TestStreamThenCodegen:
-    def test_emits_StreamThenRouter(self, transpile):
-        py = transpile(
-            'agent J { '
-            'model: stream "haiku" then "sonnet" '
-            'step r(u: string) -> string { return "ok" } '
-            '}'
-        )
-        assert "StreamThenRouter(" in py
-        assert 'stream_model="haiku"' in py
-        assert 'then_model="sonnet"' in py
+    def test_stream_then_is_rejected_at_codegen(self, transpile):
+        # It parses (see TestStreamThenParse.test_basic) but codegen must
+        # refuse to compile it — see module docstring for why.
+        with pytest.raises(CodegenError, match="stream"):
+            transpile(
+                'agent J { '
+                'model: stream "haiku" then "sonnet" '
+                'step r(u: string) -> string { return "ok" } '
+                '}'
+            )
 
     def test_default_still_uses_ModelRouter(self, transpile):
         py = transpile(

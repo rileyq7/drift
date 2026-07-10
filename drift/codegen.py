@@ -197,8 +197,8 @@ class CodeGenerator:
           the previous result forward.
         - `->`  sequential: next(prev_result)
         - `=>`  parallel fan-out: asyncio.gather over each item in prev_result
-        - `~>`  conditional: stub for now (compiles to a runtime warning)
-        - `|>`  stream: stub for now (compiles to a runtime warning)
+        - `~>`  conditional: not implemented — raises CodegenError
+        - `|>`  stream: not implemented — raises CodegenError
         - `on failure in <step>: skip ...` → try/except around that node, swallow
         - `on budget exceeded:` → catches BudgetExceeded at the outer level
         """
@@ -636,16 +636,22 @@ class CodeGenerator:
         if config is None:
             return 'ModelRouter(default="claude-sonnet")'
 
-        # `model: stream "fast" then "slow"` → StreamThenRouter, which is
-        # a ModelRouter subclass (so all the existing intent/budget plumbing
-        # treats it as a normal router) plus the stream_then_call helper
-        # for callers that want the bridge-then-reasoning pattern.
+        # `model: stream "fast" then "slow"` parses and StreamThenRouter (the
+        # runtime class this would construct) has a real stream_then_call()
+        # bridge-then-reasoning method — but no Drift syntax exists for a step
+        # body to supply the on_bridge callback, and Agent.intent() (what
+        # every intent verb actually goes through) never calls
+        # stream_then_call() itself. So declaring this today silently behaves
+        # identically to `model: default "<then_model>"` — same model, no
+        # bridge, no speed difference — with no error or comment anywhere.
+        # Reject it instead of emitting a router whose one distinguishing
+        # method nothing ever calls.
         if getattr(config, "mode", "") == "stream_then":
-            return (
-                f'StreamThenRouter('
-                f'default="{config.then_model}", '
-                f'stream_model="{config.stream_model}", '
-                f'then_model="{config.then_model}")'
+            raise CodegenError(
+                'model: stream "..." then "..." is not implemented — it parses '
+                "but no generated code ever calls the fast/slow bridge, so it "
+                'would silently behave like `model: default "<then-model>"` with '
+                "no speedup and no error. Use a plain model block instead."
             )
 
         parts = []

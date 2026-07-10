@@ -81,7 +81,7 @@ drift lex / parse         Debug tooling
 - **`step`**: typed sub-procedure. Body is a sequence of declarative statements.
 - **Intent verbs**: `summarize`, `extract`, `classify`, `translate`, `match`, `generate`, etc. Each one becomes a typed LLM call.
 - **`confident<T>`**: confidence-gated branching. Run the cheap path when sure, `fail` or hand off to a stronger path when not. (There is no `escalate` keyword.)
-- **`model { … }`**: multi-provider routing with `prefer`, `fallback`, `upgrade when confidence < 0.7`, and `stream "fast" then "slow"`.
+- **`model { … }`**: multi-provider routing with `prefer`, `fallback`, and `upgrade when confidence < 0.7`. (`stream "fast" then "slow"` parses but is a compile error — no `.drift` syntax can drive the runtime's fast/slow bridge yet.)
 - **`tool`**: declare external tools. `tool name from mcp "..."` or `tool name from python "mod:fn"`; REST tools use the inline block form (`tool name { endpoint: ... action ... }`) — there is no `from rest`. MCP runs against the official SDK.
 - **`pipeline`**: composable flow. `->` is sequential and `=>` is parallel fan-out (`asyncio.gather` over items); `~>` (conditional) and `|>` (stream) parse but are compile errors — not implemented yet, and not silently downgraded to `->` either.
 - **`for each x in xs parallel`**: `asyncio.gather` underneath.
