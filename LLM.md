@@ -527,7 +527,12 @@ Use any imported function as a normal call inside step bodies. Examples:
 - `io.fetch_url("https://...")` — async
 - `text.chunk(long_doc, max_chars: 2000)`
 
-Stubs vs real: some functions (notify.email, observe.metric) are v0.2 stubs that log to stdout instead of doing the real thing. Treat them as wired but no-op until production needs them.
+Stubs vs real, per function:
+- **Real:** everything in `drift/io` (`read`, `write`, `fetch_url`, `load_pdf`, `load_csv`), all of `drift/safety`, all of `drift/data`, `notify.webhook` (raises on 4xx/5xx), `time.now`/`time.wait`/`time.deadline`, `text.chunk`/`text.tokenize`/`text.similarity`.
+- **Stub (logs/prints, no real backend):** `notify.email`, `notify.slack`, `notify.push`, all of `drift/observe` (`log`, `trace`, `metric`; `cost_report` wraps a real `CostTracker.summary()` when one exists, otherwise stubs too).
+- **Stub by design (raises, doesn't silently no-op):** `text.embed` raises `NotImplementedError`. `time.schedule` stores to an in-process registry only — there's no daemon/cron loop, so nothing ever fires it (see the pipeline `schedule:` note in §12.1 — same underlying gap).
+
+If a `.drift` program depends on a stub actually delivering (an email arriving, a metric landing in a real dashboard), say so — don't assume "no error" means "it happened."
 
 ---
 
@@ -671,15 +676,18 @@ agent FileReader {
 ## 19. CLI
 
 ```
-drift new <name>             # scaffold a starter project
-drift run <file> [--step S] [--input '<json>'] [--watch] [--trace]
-drift check <file>           # syntax-only validation
+drift new <name> [--model M]                    # scaffold a starter project
+drift run <file> [--step S] [--agent A] [--pipeline P] [--input '<json>'] [--watch] [--trace]
+drift check <file>                               # syntax-only validation
 drift fmt <file> [--check] [--stdout]
 drift transpile <file> [-o out.py]
-drift lex <file> | drift parse <file>   # debug
+drift lex <file> | drift parse <file>            # debug
+drift mcp                                        # run as an MCP stdio server
 ```
 
-`drift run` auto-loads `.env` from the file's directory tree, transpiles to a `.py` next to the source, runs the first agent's first step (or `--step`/`--agent` if specified). `--input` takes a JSON object mapped to the step's parameters by name.
+`drift run` auto-loads `.env` from the file's directory tree, transpiles to a `.py` next to the source, runs the first agent's first step (or `--step`/`--agent`/`--pipeline` if specified). `--input` takes a JSON object mapped to the step's parameters by name.
+
+**`drift mcp`** exposes Drift itself over MCP, for another coding agent (you, if invoked that way) to call instead of shelling out to the CLI: `drift_check(source)`, `drift_transpile(source)`, `drift_run(source, input?)`. `drift_run`'s response includes `{ok, result, cost: {total_cost, budget, currency, calls}, banner}` on success, or `{ok: false, stage, kind, error, cost, banner}` on failure — `kind` is one of `budget`/`auth`/`business-logic`/`bug`, and `cost` reflects spend even when the run failed partway through. If you're calling Drift through an MCP connection rather than the CLI directly, prefer these tools over shelling out to `drift run`.
 
 ---
 
