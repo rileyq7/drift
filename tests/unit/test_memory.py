@@ -5,10 +5,23 @@ from pathlib import Path
 import pytest
 
 from drift import ast_nodes as ast
+from drift.parser import ParseError
 from drift.runtime import MemoryStore
 
 
 class TestMemoryConfigParse:
+    def test_unknown_shorthand_backend_points_at_backend_name(self, parse_ast):
+        # Regression: the error used to report the position of the token
+        # *after* the backend name (the `(`), since it was raised via
+        # self.peek() after the name token had already been consumed.
+        src = 'agent A { memory: sqlite("persona") step f() { respond "x" } }'
+        with pytest.raises(ParseError) as exc_info:
+            parse_ast(src)
+        e = exc_info.value
+        assert "sqlite" in str(e)
+        assert e.token.value == "sqlite"
+        assert e.token.col == src.index("sqlite") + 1
+
     def test_basic_block(self, parse_ast):
         d = parse_ast(
             'agent A { memory { '

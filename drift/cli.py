@@ -280,6 +280,9 @@ def cmd_transpile(args):
     except ParseError as e:
         _print_parse_error(args.file, source, e)
         sys.exit(1)
+    except CodegenError as e:
+        print(f"  ✗ {args.file} — {e}")
+        sys.exit(1)
 
 
 def _run_once(args):
@@ -368,6 +371,12 @@ def _run_once(args):
         return 1
     except ParseError as e:
         _print_parse_error(args.file, source, e)
+        return 1
+    except CodegenError as e:
+        # Distinct from _print_runtime_error: nothing ran, so there's no
+        # generated-code frame or cost banner to show — this is a rejected
+        # compile, not a failed execution.
+        print(f"  ✗ {args.file} — {e}")
         return 1
     except Exception as e:
         _print_runtime_error(args.file, e, show_trace=args.trace)

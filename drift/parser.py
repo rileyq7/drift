@@ -714,11 +714,12 @@ class Parser:
         if self.check(TT.COLON):
             self.eat(TT.COLON)
             self.skip_newlines()
-            backend_name = self.eat(TT.IDENT).value
+            backend_tok = self.eat(TT.IDENT)
+            backend_name = backend_tok.value
             if backend_name != 'dendric':
                 raise ParseError(
                     f"Unknown memory backend {backend_name!r} (expected 'dendric')",
-                    self.peek(),
+                    backend_tok,
                 )
             self.eat(TT.LPAREN)
             persona = self.eat(TT.STRING).value
