@@ -124,6 +124,25 @@ class TestIntentCodegen:
         assert 'verb="rate"' in out
         assert "criteria=criteria" in out
 
+    def test_hyphenated_word_in_multiword_description_stays_intact(self, transpile):
+        # Regression: a hyphenated word in a free-form intent-input
+        # description (e.g. "one-sentence") lexes as IDENT MINUS IDENT —
+        # indistinguishable from subtraction at the token level. Rejoining
+        # every token with a single space used to turn "one-sentence" into
+        # "one - sentence" in the actual LLM prompt text sent at runtime,
+        # silently changing what the model was asked for.
+        out = self._step_body(
+            transpile, "generate a warm one-sentence greeting as string"
+        )
+        assert 'input_data="a warm one-sentence greeting"' in out
+        assert " - " not in out
+
+    def test_multiple_hyphens_in_description_stay_intact(self, transpile):
+        out = self._step_body(
+            transpile, "generate a state-of-the-art summary as string"
+        )
+        assert 'input_data="a state-of-the-art summary"' in out
+
 
 class TestControlFlowCodegen:
     def test_if_otherwise_chain(self, transpile):
@@ -175,3 +194,70 @@ class TestImports:
         assert "Agent" in out
         assert "step_decorator" in out
         assert "ModelRouter" in out
+
+
+class TestStringEscapingIntoGeneratedSource:
+    """config values and model names are user-written STRING literals
+    interpolated into generated Python string literals. `gen_config` and
+    `gen_model_init` used to embed them with bare `"{value}"` quoting — a
+    `"` or `\\` in the value broke out of the generated literal, producing
+    a SyntaxError only `drift run` (not `drift check`) would ever surface,
+    mislabeled as a "Runtime error" even though nothing had executed.
+    """
+    import ast as _py_ast
+
+    def test_config_value_with_embedded_quote_produces_valid_python(self, transpile):
+        out = transpile('config { name: "my \\"agent\\"" version: "1.0" }')
+        self._py_ast.parse(out)  # raises SyntaxError if codegen is broken
+        assert 'my \\"agent\\"' in out
+
+    def test_config_value_with_backslash_produces_valid_python(self, transpile):
+        out = transpile('config { name: "C:\\\\Users\\\\x" version: "1.0" }')
+        self._py_ast.parse(out)
+
+    def test_model_default_with_embedded_quote_produces_valid_python(self, transpile):
+        src = 'agent A { model: "claude\\"haiku" step f() { respond "x" } }'
+        out = transpile(src)
+        self._py_ast.parse(out)
+
+    def test_model_fallback_with_embedded_quote_produces_valid_python(self, transpile):
+        src = (
+            'agent A { model { default: "claude-haiku" '
+            'fallback: "gpt\\"4o" } step f() { respond "x" } }'
+        )
+        out = transpile(src)
+        self._py_ast.parse(out)
+
+    def test_model_upgrade_target_with_embedded_quote_produces_valid_python(self, transpile):
+        src = (
+            'agent A { model { default: "claude-haiku" '
+            'upgrade to "claude\\"opus" when { confidence < 0.5 } } '
+            'step f() { respond "x" } }'
+        )
+        out = transpile(src)
+        self._py_ast.parse(out)
+
+    def test_generate_catches_a_codegen_bug_that_produces_invalid_python(self, monkeypatch):
+        # Safety net: exercise the REAL generate() end-to-end, with a single
+        # gen_config call patched to reintroduce the old unescaped-quoting
+        # bug, to prove generate()'s own validation (not a reimplementation
+        # of it) catches broken output as a CodegenError — instead of
+        # `drift check` reporting "syntax OK" on source that only fails at
+        # `drift run`.
+        from drift.lexer import lex
+        from drift.parser import Parser
+        from drift.codegen import CodeGenerator, CodegenError
+
+        def broken_gen_config(self, config):
+            self.emit_line("DRIFT_CONFIG = {")
+            self.indent()
+            for k, v in config.entries.items():
+                self.emit_line(f'"{k}": "{v}",')  # the old, unescaped bug
+            self.dedent()
+            self.emit_line("}")
+
+        monkeypatch.setattr(CodeGenerator, "gen_config", broken_gen_config)
+
+        program = Parser(lex('config { name: "my \\"agent\\"" }')).parse()
+        with pytest.raises(CodegenError, match="codegen produced invalid Python"):
+            CodeGenerator().generate(program)

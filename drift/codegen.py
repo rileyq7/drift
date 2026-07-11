@@ -120,7 +120,31 @@ class CodeGenerator:
                 self.gen_pipeline(decl)
             self.emit_line("")
 
-        return '\n'.join(self.lines)
+        python_source = '\n'.join(self.lines)
+
+        # Verify the emitted text is actually valid Python before handing it
+        # back. Codegen is meant to be a total function from valid AST to
+        # valid Python — a SyntaxError here means a bug in codegen itself
+        # (e.g. a user string value interpolated into a Python literal
+        # without escaping), not a rejected-but-documented construct like
+        # `~>` or `parallel step` (those raise CodegenError directly, above,
+        # before ever reaching this point). Catching it here means `drift
+        # check` — which runs codegen and discards the output specifically
+        # to catch can't-compile constructs — actually catches this class
+        # too, instead of reporting "syntax OK" on source that fails only
+        # once you get to `drift run`.
+        try:
+            py_ast.parse(python_source)
+        except SyntaxError as e:
+            raise CodegenError(
+                f"codegen produced invalid Python (a codegen bug, not a "
+                f"rejected .drift construct): {e.msg} at generated line "
+                f"{e.lineno}. This means a value somewhere wasn't escaped "
+                f"correctly when embedded into the output — please report "
+                f"this as a Drift bug rather than trying to work around it."
+            ) from e
+
+        return python_source
 
     # ─── Output Helpers ────────────────────────────────────────────
 
@@ -523,7 +547,11 @@ class CodeGenerator:
         self.emit_line(f"DRIFT_CONFIG = {{")
         self.indent()
         for k, v in config.entries.items():
-            self.emit_line(f'"{k}": "{v}",')
+            # k is a lexer IDENT (alphanumeric/underscore only, always safe
+            # to embed bare); v is a user-written STRING literal and must be
+            # re-escaped, not interpolated raw — a `"` or `\` in v would
+            # otherwise break out of the generated string literal.
+            self.emit_line(f'"{k}": {_py_str_literal(v)},')
         self.dedent()
         self.emit_line("}")
 
@@ -749,11 +777,18 @@ class CodeGenerator:
                 "no speedup and no error. Use a plain model block instead."
             )
 
+        # Model names below are user-written STRING literals — always embed
+        # via _py_str_literal (like the rest of codegen), never bare
+        # "{...}" quoting, so a quote/backslash in a model name can't break
+        # out of the generated string literal (drift check ran codegen but
+        # never verified the output was valid Python, so this class of bug
+        # used to slip through as a "syntax OK" that produced a SyntaxError
+        # only at `drift run`).
         parts = []
         if config.default:
-            parts.append(f'default="{config.default}"')
+            parts.append(f'default={_py_str_literal(config.default)}')
         if config.prefer and config.prefer != config.default:
-            parts.append(f'prefer="{config.prefer}"')
+            parts.append(f'prefer={_py_str_literal(config.prefer)}')
         # Block form populates fallback_list/never_list; colon form sets
         # the scalar `fallback`/`never`. Normalize.
         fallbacks = list(config.fallback_list) if config.fallback_list else (
@@ -763,19 +798,21 @@ class CodeGenerator:
             [config.never] if config.never else []
         )
         if fallbacks:
-            parts.append("fallback=[" + ", ".join(f'"{m}"' for m in fallbacks) + "]")
+            parts.append("fallback=[" + ", ".join(_py_str_literal(m) for m in fallbacks) + "]")
         if nevers:
-            parts.append("never=[" + ", ".join(f'"{m}"' for m in nevers) + "]")
+            parts.append("never=[" + ", ".join(_py_str_literal(m) for m in nevers) + "]")
         if config.upgrades:
             rules = []
             for u in config.upgrades:
                 cond_reprs = []
                 for c in u.conditions:
+                    # c.kind is one of two internal literals set by the
+                    # parser (confidence_lt/step_is), never user text.
                     cond_reprs.append(
                         f'{{"kind": "{c.kind}", "value": {c.value!r}}}'
                     )
                 rules.append(
-                    f'{{"target": "{u.target_model}", '
+                    f'{{"target": {_py_str_literal(u.target_model)}, '
                     f'"conditions": [{", ".join(cond_reprs)}]}}'
                 )
             parts.append("upgrades=[" + ", ".join(rules) + "]")
