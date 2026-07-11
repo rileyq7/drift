@@ -31,6 +31,7 @@ from typing import Any
 from drift.lexer import lex, LexError
 from drift.parser import Parser, ParseError
 from drift.codegen import CodeGenerator, CodegenError
+from drift.runtime.core import BudgetExceeded, StepFailed, AuthError
 
 
 def _transpile(source: str) -> str:
@@ -65,7 +66,9 @@ def _check(source: str) -> dict:
 
 async def _run(source: str, input_json: str | None = None) -> dict:
     """Transpile + exec a Drift program against the runtime. Returns
-    {ok, result?, cost?, calls?, error?, traceback?}.
+    {ok, result?, cost?, banner?, error?, stage?, kind?} — `cost` is a
+    {total_cost, budget, currency, calls} snapshot, present on both success
+    and a "run"-stage failure (a run can spend real money before failing).
 
     Async because it awaits the agent directly: the MCP server calls this from
     an already-running event loop, so `asyncio.run()` here would raise
@@ -92,7 +95,7 @@ async def _run(source: str, input_json: str | None = None) -> dict:
             try:
                 spec.loader.exec_module(module)
             except Exception as e:
-                return {"ok": False, "stage": "import", "error": str(e)}
+                return {"ok": False, "stage": "import", "error": f"{type(e).__name__}: {e}"}
 
             from drift.runtime.core import Agent, run_agent
             agents = {n: getattr(module, n) for n in dir(module)
@@ -109,10 +112,34 @@ async def _run(source: str, input_json: str | None = None) -> dict:
             old_out = sys.stdout
             buf = io.StringIO()
             sys.stdout = buf
+            cost: dict = {}
             try:
-                result = await run_agent(agent_cls, inputs=inputs)
+                result = await run_agent(agent_cls, inputs=inputs, cost_out=cost)
             except Exception as e:
-                return {"ok": False, "stage": "run", "error": f"{type(e).__name__}: {e}"}
+                sys.stdout = old_out
+                # BudgetExceeded/StepFailed/AuthError are the agent's own
+                # business-logic outcomes (bad LLM output, exhausted retries,
+                # bad credentials) — distinct from an infra/codegen bug, so a
+                # calling agent can tell "your program has a bug" apart from
+                # "the run failed for a reason your program already handles".
+                # Cost is attached by run_agent (see `_drift_cost`) even on
+                # failure, since a run can spend real money before failing.
+                if isinstance(e, BudgetExceeded):
+                    kind = "budget"
+                elif isinstance(e, AuthError):
+                    kind = "auth"
+                elif isinstance(e, StepFailed):
+                    kind = "business-logic"
+                else:
+                    kind = "bug"
+                return {
+                    "ok": False,
+                    "stage": "run",
+                    "kind": kind,
+                    "error": f"{type(e).__name__}: {e}",
+                    "cost": getattr(e, "_drift_cost", cost or None),
+                    "banner": buf.getvalue(),
+                }
             finally:
                 sys.stdout = old_out
 
@@ -120,6 +147,7 @@ async def _run(source: str, input_json: str | None = None) -> dict:
             return {
                 "ok": True,
                 "result": _to_jsonable(result),
+                "cost": cost,
                 "banner": banner,
             }
         finally:

@@ -416,6 +416,7 @@ Inside a step:
 ```drift
 let forecast = weather.get_forecast(city: "Boston")
 ```
+MCP method names aren't validated at `drift check`/transpile time — there's no static schema, since the server's tool list is only known by actually connecting to it. A typo'd method name (`weather.get_forcast`) parses and transpiles cleanly and, in tests using the mock MCP session (`use_mock()`), even *runs* cleanly — the mock echoes back any unrecognized method as a fake success rather than erroring, by design (so tests aren't blocked on full server wiring). It will only fail against a real server, as an MCP protocol error at call time. Double-check MCP method names against the actual server (or its docs) rather than trusting a clean `drift check`/mock-backed `drift run`.
 
 **Python module function:**
 ```drift

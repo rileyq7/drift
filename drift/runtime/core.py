@@ -1546,12 +1546,18 @@ class Agent:
 # ─── Runner ────────────────────────────────────────────────────────────
 
 async def run_agent(agent_class: type, step_name: str = None,
-                    inputs: dict = None) -> Any:
+                    inputs: dict = None, cost_out: dict = None) -> Any:
     """
     Run a Drift agent from the command line.
 
     Creates an instance, finds the target step, calls it with inputs,
     and prints the cost report.
+
+    `cost_out`, if given, is filled in-place with a structured cost snapshot
+    (`total_cost`, `budget`, `currency`, `calls`) on both success and failure
+    — callers that need cost data beyond the printed summary (e.g. the MCP
+    server, which can't rely on a human being able to read stdout) pass a
+    dict here instead of re-deriving agent/step discovery themselves.
     """
     agent = agent_class()
     inputs = inputs or {}
@@ -1599,6 +1605,15 @@ async def run_agent(agent_class: type, step_name: str = None,
     print(f"  Step: {step_name}({', '.join(f'{k}={v!r}' for k, v in inputs.items())})")
     print()
 
+    def _cost_snapshot() -> dict:
+        tracker = agent.cost_tracker
+        return {
+            'total_cost': tracker.total_cost,
+            'budget': tracker.budget.max_per_run,
+            'currency': tracker.budget.currency,
+            'calls': list(tracker.call_log),
+        }
+
     try:
         start = time.time()
         result = await method(**inputs)
@@ -1615,15 +1630,24 @@ async def run_agent(agent_class: type, step_name: str = None,
             else:
                 print(f"  {result}")
 
+        if cost_out is not None:
+            cost_out.update(_cost_snapshot())
         return result
 
-    except BudgetExceeded as e:
+    except Exception as e:
+        # Every failure path (BudgetExceeded, StepFailed, or a genuine bug)
+        # may come after real spend — tag the exception with a structured
+        # cost snapshot so callers (CLI, MCP server) can report what was
+        # spent even though the run didn't complete. Mirrors the
+        # _drift_agent/_drift_step tagging step_decorator already does.
+        # Exception (not BaseException): don't intercept cancellation/exit.
+        snapshot = _cost_snapshot()
+        e._drift_cost = snapshot
+        if cost_out is not None:
+            cost_out.update(snapshot)
         # The CLI's _print_runtime_error renders a structured frame; just
         # surface the cost summary first so the user sees what they spent.
         print(agent.cost_tracker.summary())
-        raise
-
-    except StepFailed:
         raise
 
     finally:

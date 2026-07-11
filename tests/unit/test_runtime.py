@@ -7,7 +7,7 @@ import pytest
 from drift.runtime import (
     Agent, Budget, CostTracker, ModelRouter,
     BudgetExceeded, ModelUnavailable, RateLimited, AuthError,
-    SchemaViolation, step_decorator, run_agent,
+    SchemaViolation, StepFailed, step_decorator, run_agent,
 )
 from drift.runtime.core import parse_llm_response, MockProvider
 
@@ -383,3 +383,70 @@ class TestEntryStepSelection:
         result = await run_agent(Ordered)
         assert result == "triage"
         assert calls == ["triage"]
+
+
+# ─── Cost reporting on run_agent (success and failure) ───────────────
+
+class TestRunAgentCostOut:
+    """run_agent's `cost_out` param and the `_drift_cost` exception tag —
+    a run can spend real budget before failing, and callers that can't read
+    the printed stdout summary (the MCP server) need that spend as
+    structured data instead of losing it."""
+
+    @pytest.mark.asyncio
+    async def test_cost_out_filled_on_success(self):
+        class Spends(Agent):
+            def __init__(self):
+                super().__init__(name="Spends", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def go(self):
+                self.cost_tracker.record(0.25, "mock-model", 10, 5)
+                return "done"
+
+        cost = {}
+        result = await run_agent(Spends, cost_out=cost)
+        assert result == "done"
+        assert cost["total_cost"] == 0.25
+        assert cost["budget"] == 1.0
+        assert len(cost["calls"]) == 1
+        assert cost["calls"][0]["model"] == "mock-model"
+
+    @pytest.mark.asyncio
+    async def test_cost_out_filled_and_exception_tagged_on_budget_exceeded(self):
+        class Overspends(Agent):
+            def __init__(self):
+                super().__init__(name="Overspends", budget=Budget(max_per_run=0.10))
+
+            @step_decorator()
+            async def go(self):
+                self.cost_tracker.record(0.05, "mock-model", 10, 5)
+                self.cost_tracker.reserve(1.0)  # exceeds the 0.10 cap
+                return "unreachable"
+
+        cost = {}
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await run_agent(Overspends, cost_out=cost)
+
+        # Spend that happened before the failure isn't lost.
+        assert cost["total_cost"] == 0.05
+        assert len(cost["calls"]) == 1
+        assert exc_info.value._drift_cost == cost
+
+    @pytest.mark.asyncio
+    async def test_cost_out_filled_on_step_failed(self):
+        class Fails(Agent):
+            def __init__(self):
+                super().__init__(name="Fails", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def go(self):
+                self.cost_tracker.record(0.02, "mock-model", 10, 5)
+                raise StepFailed("business logic gave up")
+
+        cost = {}
+        with pytest.raises(StepFailed) as exc_info:
+            await run_agent(Fails, cost_out=cost)
+
+        assert cost["total_cost"] == 0.02
+        assert exc_info.value._drift_cost["total_cost"] == 0.02
