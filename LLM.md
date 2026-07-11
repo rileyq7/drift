@@ -180,9 +180,10 @@ Upgrade conditions (any one triggers): `confidence < <float>`, `input_tokens > <
 ```drift
 budget: $0.10 per run
 budget: £5 per run
+budget: $1 max        -- `max` is shorthand for `per run`
 ```
 
-Hard ceiling. Exceeding raises `BudgetExceeded` and stops the agent.
+Hard ceiling. Exceeding raises `BudgetExceeded` and stops the agent. **`per run` (or `max`) is the only period implemented.** `per day`/`per company`/anything else is a `ParseError` — there's no cross-run/cross-entity budget ledger in Drift, so declaring one would either need to be silently downgraded to per-run (misleading) or rejected; it's rejected. Don't emit `per day` or similar expecting it to work.
 
 ### 8.2.1 `quality` (optional)
 
@@ -217,12 +218,13 @@ The string is a persona key — distinct keys give isolated memories. Requires `
 **Block form:**
 ```drift
 memory {
-  store: "sqlite"
+  store: "sqlite://:memory:"
   recall strategy: "semantic"
   max recall: 10 items
   decay: enabled
 }
 ```
+`store` must be a `sqlite://` URL (`sqlite://:memory:` for in-process/lost-on-restart, `sqlite://path/to/file.db` for file-backed) — a bare `"sqlite"` is a `ValueError` at agent construction, not a recognized shorthand. `recall strategy: "semantic"` currently behaves identically to `"relevant"` (substring match) — no embedding model is wired in yet; falls back visibly (prints a notice), not silently. `decay: enabled` parses and is stored but has no effect — there's no decay/forgetting-over-time logic implemented for the SQLite backend.
 
 ### 8.5 `step`
 

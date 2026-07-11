@@ -38,10 +38,13 @@ class EmailAnalysis:
     confidence: float  # valid range: 0.0 to 1.0
 
     def validate(self):
-        """Validate field constraints."""
-        if self.confidence is not None:
-            assert 0.0 <= self.confidence <= 1.0, \
-                f"confidence must be between 0.0 and 1.0, got {self.confidence}"
+        """Validate field constraints. Raises SchemaViolation on failure."""
+        if self.confidence is not None and not (0.0 <= self.confidence <= 1.0):
+            raise SchemaViolation(f"confidence must be between 0.0 and 1.0, got {self.confidence}")
+        if self.priority is not None and self.priority not in ('urgent', 'normal', 'low'):
+            raise SchemaViolation(f"priority must be one of 'urgent', 'normal', 'low', got {self.priority!r}")
+        if self.category is not None and self.category not in ('work', 'personal', 'newsletter', 'spam'):
+            raise SchemaViolation(f"category must be one of 'work', 'personal', 'newsletter', 'spam', got {self.category!r}")
         return self
 
 # ── Agent: InboxSorter ──

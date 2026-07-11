@@ -661,10 +661,27 @@ class Parser:
         config.currency_sym = currency_tok.value[0]
         config.value = float(currency_tok.value[1:])
 
-        # per run / per day / per company
+        # per run — the only period actually enforced (a single-process,
+        # single-run Budget ceiling; see drift/runtime/core.py CostTracker).
+        # `per day`/`per company` used to parse and be silently ignored —
+        # codegen always built Budget(max_per_run=...) regardless of what was
+        # declared, so a user asking for a $50/day cap actually got a $50
+        # PER-RUN cap with no error. Cross-run/cross-entity budget tracking
+        # would need a persistent ledger Drift doesn't have, so reject other
+        # periods instead of silently downgrading them.
         if self.check_ident('per'):
             self.eat()
-            config.per = self.eat(TT.IDENT).value
+            period_tok = self.eat(TT.IDENT)
+            config.per = period_tok.value
+            if config.per != 'run':
+                raise ParseError(
+                    f"budget: ... per {config.per!r} is not implemented — only "
+                    "`per run` is enforced (a single-run cost ceiling; see "
+                    "CostTracker). `per day`/`per company`/etc. would need "
+                    "cross-run budget tracking Drift doesn't have yet, and "
+                    "silently behaving like `per run` would be misleading.",
+                    period_tok,
+                )
         # max
         elif self.check_ident('max'):
             self.eat()

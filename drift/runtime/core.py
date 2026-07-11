@@ -408,12 +408,19 @@ class ModelRouter:
         return out
 
     def _apply_upgrades(self, base: str, context: dict) -> str:
-        """Evaluate upgrade rules. First matching rule wins."""
+        """Evaluate upgrade rules. First matching rule wins.
+
+        Conditions within one rule's `when { ... }` block are OR'd — "any
+        one triggers" per LLM.md's documented semantics — not AND'd. A rule
+        with no conditions never fires (an empty when-block isn't "always
+        true"; that would upgrade unconditionally with no way to express it).
+        """
         for rule in self.upgrades:
             target = rule.get("target")
             if not target or target in self._unavailable or target in self.never:
                 continue
-            if all(self._cond_holds(c, context) for c in rule.get("conditions", [])):
+            conditions = rule.get("conditions", [])
+            if conditions and any(self._cond_holds(c, context) for c in conditions):
                 return target
         return base
 

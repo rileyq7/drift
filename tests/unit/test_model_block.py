@@ -88,8 +88,10 @@ class TestRouterUpgradeAtRuntime:
         assert r.select(context={"input_tokens": 20000}) == "claude-sonnet"
         assert r.select(context={"input_tokens": 5000}) == "claude-haiku"
 
-    def test_all_conditions_must_match(self):
-        # Both conditions present, only one true → no upgrade.
+    def test_any_one_condition_triggers(self):
+        # LLM.md documents multiple conditions in one `when { }` block as
+        # "any one triggers" (OR), not "all must hold" (AND) — either
+        # condition alone must be enough to upgrade.
         r = ModelRouter(
             default="claude-haiku",
             upgrades=[{
@@ -100,8 +102,23 @@ class TestRouterUpgradeAtRuntime:
                 ],
             }],
         )
-        assert r.select(context={"step": "finalize", "input_tokens": 5000}) == "claude-haiku"
+        # Neither condition true → no upgrade.
+        assert r.select(context={"step": "other", "input_tokens": 5000}) == "claude-haiku"
+        # Only step_is true → upgrades (OR, not AND).
+        assert r.select(context={"step": "finalize", "input_tokens": 5000}) == "claude-opus"
+        # Only tokens_gt true → upgrades.
+        assert r.select(context={"step": "other", "input_tokens": 20000}) == "claude-opus"
+        # Both true → still upgrades.
         assert r.select(context={"step": "finalize", "input_tokens": 20000}) == "claude-opus"
+
+    def test_empty_conditions_never_fires(self):
+        # An upgrade rule with no conditions must not be treated as "always
+        # true" — that would upgrade unconditionally with no visible trigger.
+        r = ModelRouter(
+            default="claude-haiku",
+            upgrades=[{"target": "claude-opus", "conditions": []}],
+        )
+        assert r.select(context={}) == "claude-haiku"
 
     def test_confidence_lt_uses_last_recorded(self):
         r = ModelRouter(

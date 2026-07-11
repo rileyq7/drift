@@ -32,6 +32,24 @@ class TestSchemaCodegen:
         assert "def validate(self):" in out
         assert "0.0 <= self.score <= 100.0" in out
 
+    def test_between_violation_raises_schema_violation_not_assertion_error(self, transpile):
+        # step_decorator's retry loop only catches SchemaViolation to retry
+        # with a stricter prompt (see drift/runtime/core.py). An
+        # AssertionError from a bare `assert` used to crash the step outright
+        # on the first out-of-range value instead of getting that retry.
+        out = transpile("schema X { score: number between 0 and 100 }")
+        assert "raise SchemaViolation(" in out
+        assert "assert " not in out
+
+    def test_one_of_constraint_generates_validate(self, transpile):
+        # `one of` used to become ONLY a Literal[...] type hint with nothing
+        # checking it at runtime — an LLM returning an out-of-enum value
+        # passed validation silently. Must now generate a real check too.
+        out = transpile('schema X { fit: one of "a", "b" }')
+        assert "def validate(self):" in out
+        assert "self.fit not in ('a', 'b')" in out
+        assert "raise SchemaViolation(" in out
+
     def test_confident_becomes_runtime_class(self, transpile):
         # confident<T> compiles to the Confident runtime class. T is doc only —
         # the runtime stores Any in .value.

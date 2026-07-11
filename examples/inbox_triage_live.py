@@ -36,6 +36,14 @@ class EmailAnalysis:
     summary: str
     suggested_action: str
 
+    def validate(self):
+        """Validate field constraints. Raises SchemaViolation on failure."""
+        if self.priority is not None and self.priority not in ('urgent', 'normal', 'low'):
+            raise SchemaViolation(f"priority must be one of 'urgent', 'normal', 'low', got {self.priority!r}")
+        if self.category is not None and self.category not in ('billing', 'support', 'sales', 'spam', 'personal'):
+            raise SchemaViolation(f"category must be one of 'billing', 'support', 'sales', 'spam', 'personal', got {self.category!r}")
+        return self
+
 # ── Agent: InboxTriage ──
 
 class InboxTriage(Agent):

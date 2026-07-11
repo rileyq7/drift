@@ -104,12 +104,13 @@ memory: dendric("user_persona_key")
 **SQLite** (simpler, file-based):
 ```drift
 memory {
-  store: "sqlite"
+  store: "sqlite://:memory:"       -- or "sqlite://path/to/file.db"
   recall strategy: "semantic"
   max recall: 10 items
   decay: enabled
 }
 ```
+`store` must be a `sqlite://` URL — a bare `"sqlite"` is a `ValueError` at construction. `recall strategy: "semantic"` currently behaves like `"relevant"` (substring match, no embeddings yet). `decay: enabled` parses but has no effect (no decay logic implemented). See [`LLM.md`](../LLM.md) §8.4 for detail.
 
 Memory operations:
 ```drift

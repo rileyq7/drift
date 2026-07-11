@@ -99,6 +99,36 @@ class TestRestForm:
         assert "auth_env = 'CH_KEY'" in out
         assert "auth_literal = None" in out
 
+    def test_post_param_not_in_path_goes_in_json_body(self, transpile):
+        # LLM.md's own documented example: `title` isn't in the path
+        # template, so it used to be silently dropped — POST went out with
+        # no body at all. It must now be sent as a JSON body field.
+        out = transpile(
+            'tool gh { endpoint: "https://api.github.com" '
+            'action create_issue(repo: string, title: string) -> string { '
+            '  POST "/repos/{repo}/issues" '
+            '} }'
+        )
+        assert "_body = {'title': title}" in out
+        assert "json=_body" in out
+        # `repo` is consumed by the path template, not duplicated into the body.
+        assert "'repo': repo" not in out
+
+    def test_get_param_not_in_path_goes_in_query_string(self, transpile):
+        out = transpile(
+            'tool gh { endpoint: "https://api.github.com" '
+            'action search(q: string, per_page: int) -> string { '
+            '  GET "/search" '
+            '} }'
+        )
+        assert "_query = {'q': q, 'per_page': per_page}" in out
+        assert "params=_query" in out
+
+    def test_all_params_in_path_emits_no_extra_body_or_query(self, transpile):
+        out = transpile(self.REST)  # lookup(company_number) -> GET "/company/{company_number}"
+        assert "_body" not in out
+        assert "_query" not in out
+
     def test_all_http_methods_accepted(self, parse_ast):
         for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]:
             src = (

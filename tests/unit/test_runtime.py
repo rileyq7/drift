@@ -240,6 +240,35 @@ class TestStepDecoratorRetry:
         assert agent.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_validate_failure_retries_not_crashes(self):
+        # A dataclass's validate() (generated from `between`/`one of`
+        # constraints) raising SchemaViolation must trigger the same retry
+        # path as a malformed-JSON SchemaViolation — not propagate as an
+        # unhandled crash. This is the runtime half of the codegen fix that
+        # switched constraint checks from bare `assert` (AssertionError,
+        # uncaught here) to `raise SchemaViolation(...)`.
+        agent = StubAgent()
+
+        @dataclass
+        class Scored:
+            score: float
+            def validate(self):
+                if not (0.0 <= self.score <= 100.0):
+                    raise SchemaViolation(f"score out of range: {self.score}")
+                return self
+
+        @step_decorator(output=Scored)
+        async def step(self):
+            self.call_count += 1
+            # First call: LLM "hallucinated" an out-of-range score.
+            # Second call: valid.
+            return Scored(score=150.0) if self.call_count < 2 else Scored(score=50.0)
+
+        result = await step(agent)
+        assert result.score == 50.0
+        assert agent.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_falls_back_on_model_unavailable(self):
         agent = StubAgent()
 

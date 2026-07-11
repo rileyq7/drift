@@ -37,13 +37,13 @@ class FitScore:
     confidence: float  # valid range: 0.0 to 1.0
 
     def validate(self):
-        """Validate field constraints."""
-        if self.overall_score is not None:
-            assert 0.0 <= self.overall_score <= 100.0, \
-                f"overall_score must be between 0.0 and 100.0, got {self.overall_score}"
-        if self.confidence is not None:
-            assert 0.0 <= self.confidence <= 1.0, \
-                f"confidence must be between 0.0 and 1.0, got {self.confidence}"
+        """Validate field constraints. Raises SchemaViolation on failure."""
+        if self.overall_score is not None and not (0.0 <= self.overall_score <= 100.0):
+            raise SchemaViolation(f"overall_score must be between 0.0 and 100.0, got {self.overall_score}")
+        if self.confidence is not None and not (0.0 <= self.confidence <= 1.0):
+            raise SchemaViolation(f"confidence must be between 0.0 and 1.0, got {self.confidence}")
+        if self.recommendation is not None and self.recommendation not in ('strong fit', 'possible fit', 'weak fit', 'no fit'):
+            raise SchemaViolation(f"recommendation must be one of 'strong fit', 'possible fit', 'weak fit', 'no fit', got {self.recommendation!r}")
         return self
 
 # ── Custom verb: compare_score ──

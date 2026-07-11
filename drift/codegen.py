@@ -465,11 +465,29 @@ class CodeGenerator:
             path_fstring = "f" + repr(action.path)
             self.emit_line(f"path = {path_fstring}")
             self.emit_line(f"url = self.endpoint + path")
+
+            # Params not consumed by the {var} path template must still go
+            # somewhere: query string for GET/DELETE/HEAD, JSON body for
+            # POST/PUT/PATCH. Previously they were silently dropped — e.g. a
+            # documented `create_issue(repo, title)` action would POST with
+            # no body at all, discarding `title`.
+            path_vars = set(re.findall(r"\{(\w+)\}", action.path))
+            extra_params = [p.name for p in action.params if p.name not in path_vars]
+            method = action.method.lower()
+            call_kwargs = ["headers=self._auth_header()", "timeout=30.0"]
+            if extra_params:
+                extras_dict = "{" + ", ".join(f"{repr(n)}: {n}" for n in extra_params) + "}"
+                if method in ("post", "put", "patch"):
+                    self.emit_line(f"_body = {extras_dict}")
+                    call_kwargs.append("json=_body")
+                else:
+                    self.emit_line(f"_query = {extras_dict}")
+                    call_kwargs.append("params=_query")
+
             self.emit_line(f"async with httpx.AsyncClient() as client:")
             self.indent()
-            method = action.method.lower()
             self.emit_line(
-                f"resp = await client.{method}(url, headers=self._auth_header(), timeout=30.0)"
+                f"resp = await client.{method}(url, {', '.join(call_kwargs)})"
             )
             self.dedent()
             self.emit_line("resp.raise_for_status()")
@@ -538,21 +556,44 @@ class CodeGenerator:
 
                 self.emit_line(f"{f.name}: {py_type}{default}{constraint_comment}")
 
-            # Generate validation method
-            has_constraints = any(f.constraints for f in schema.fields)
+            # Generate validation method. `one of "a", "b", ...` (EnumType)
+            # used to only become a `Literal[...]` type hint with nothing
+            # checking it at runtime, unlike `number between A and B` (a real
+            # check below) — an LLM returning an out-of-enum value passed
+            # validation silently. Both now generate a real check.
+            #
+            # Raises SchemaViolation, not AssertionError: step_decorator's
+            # retry loop (drift/runtime/core.py) only catches SchemaViolation
+            # to retry with a stricter prompt. An AssertionError here used to
+            # crash the step outright on the FIRST out-of-range/out-of-enum
+            # value instead of getting the documented retry.
+            enum_fields = [f for f in schema.fields if isinstance(f.type_expr, ast.EnumType)]
+            has_constraints = any(f.constraints for f in schema.fields) or enum_fields
             if has_constraints:
                 self.emit_line("")
                 self.emit_line("def validate(self):")
                 self.indent()
-                self.emit_line('"""Validate field constraints."""')
+                self.emit_line('"""Validate field constraints. Raises SchemaViolation on failure."""')
                 for f in schema.fields:
                     for c in f.constraints:
                         if isinstance(c, ast.BetweenConstraint):
-                            self.emit_line(f"if self.{f.name} is not None:")
+                            self.emit_line(f"if self.{f.name} is not None and not ({c.low} <= self.{f.name} <= {c.high}):")
                             self.indent()
-                            self.emit_line(f"assert {c.low} <= self.{f.name} <= {c.high}, \\")
-                            self.emit_line(f'    f"{f.name} must be between {c.low} and {c.high}, got {{self.{f.name}}}"')
+                            self.emit_line(
+                                f'raise SchemaViolation('
+                                f'f"{f.name} must be between {c.low} and {c.high}, got {{self.{f.name}}}")'
+                            )
                             self.dedent()
+                for f in enum_fields:
+                    vals = ", ".join(repr(v) for v in f.type_expr.values)
+                    tail_comma = ',' if len(f.type_expr.values) == 1 else ''
+                    self.emit_line(f"if self.{f.name} is not None and self.{f.name} not in ({vals}{tail_comma}):")
+                    self.indent()
+                    self.emit_line(
+                        f'raise SchemaViolation('
+                        f'f"{f.name} must be one of {vals}, got {{self.{f.name}!r}}")'
+                    )
+                    self.dedent()
                 self.emit_line("return self")
                 self.dedent()
 

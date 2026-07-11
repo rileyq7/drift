@@ -84,23 +84,23 @@ let scored = rate input against rubric as confident<Score>
 ```drift
 agent Counter {
   state { count: int = 0 }
-  step bump() -> int { count = count + 1; return count }
+  step check() -> int { return self.count }
 }
 ```
 
-This **always returns 1**. Use `memory:` for cross-run persistence. `state` is for within-run scratch.
+`self.count` is re-initialized to `0` in `__init__` on every run — there's no way to mutate it back out to a persistent value either (Drift has no assignment statement; `let` only binds new locals once). `state` is within-run scratch, reset every run, read-only in practice today. Use `memory:` for cross-run persistence.
 
 ## Memory shorthand vs block — pick one
 
 ```drift
 -- WRONG — can't have both
 memory: dendric("x")
-memory { store: "sqlite" }
+memory { store: "sqlite://:memory:" }
 
 -- RIGHT
 memory: dendric("x")
 -- or
-memory { store: "sqlite" }
+memory { store: "sqlite://:memory:" }
 ```
 
 ## PascalCase vs snake_case is enforced
@@ -215,6 +215,8 @@ forget memories where temp < 0.2
 -- Not supported (would need a custom Python tool)
 forget memories matching some_lambda
 ```
+
+Against the default mock memory backend (no `DATABASE_URL` — what every test uses), only `forget memories tagged "..."` actually does anything; the age/temp predicates are silent no-ops there (the mock tracks neither). All three work against a real Dendric backend. See [`LLM.md`](../LLM.md) §"Mock backend caveat" for detail.
 
 ## Block comments must balance
 

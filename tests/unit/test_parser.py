@@ -101,6 +101,20 @@ class TestAgent:
         assert d.budget_config.currency_sym == "£"
         assert d.budget_config.per == "run"
 
+    def test_budget_per_day_is_rejected(self):
+        # `per day`/`per company` used to parse and be silently ignored —
+        # codegen always built a per-run Budget ceiling regardless, so a
+        # declared $50/day cap actually enforced $50/run with no warning.
+        # Only `per run` is implemented; other periods are a parse error.
+        src = 'agent X { budget: $50 per day step f() { respond "x" } }'
+        with pytest.raises(ParseError, match="per 'day'"):
+            single_decl(src)
+
+    def test_budget_max_still_means_per_run(self):
+        src = 'agent X { budget: $10 max step f() { respond "x" } }'
+        d = single_decl(src)
+        assert d.budget_config.per == "run"
+
     def test_quality_min_confidence(self):
         src = 'agent X { quality: 0.9 minimum confidence step f() { respond "x" } }'
         d = single_decl(src)
