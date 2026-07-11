@@ -17,6 +17,35 @@ _NO_SPACE_AFTER = {TT.LPAREN, TT.LBRACKET, TT.DOT}
 _NO_SPACE_BEFORE = {TT.COMMA, TT.RPAREN, TT.RBRACKET, TT.COLON, TT.DOT}
 
 
+def _reindent_comment(value: str, indent: int) -> list[str]:
+    """Render a (possibly multi-line `{- ... -}`) comment token at `indent`.
+
+    The lexer stores the comment's raw source text, continuation lines and
+    all, so their *original* indentation is baked into `value`. Re-applying
+    the current `indent` on top of that verbatim would grow with every
+    format pass. Dedent continuation lines to their common leading
+    whitespace first, then re-indent, so formatting twice matches formatting
+    once.
+    """
+    lines = value.splitlines()
+    if len(lines) <= 1:
+        return [("  " * indent) + value]
+
+    prefix = "  " * indent
+    body_lines = lines[1:]
+    non_blank = [l for l in body_lines if l.strip()]
+    if non_blank:
+        common = min(len(l) - len(l.lstrip()) for l in non_blank)
+    else:
+        common = 0
+
+    out = [prefix + lines[0]]
+    for line in body_lines:
+        dedented = line[common:] if line.strip() else ""
+        out.append((prefix + dedented) if dedented else "")
+    return out
+
+
 def format_source(source: str) -> str:
     tokens = lex(source)
     out: list[str] = []
@@ -47,8 +76,8 @@ def format_source(source: str) -> str:
 
         if t.type == TT.COMMENT:
             flush()
-            for line in t.value.splitlines():
-                out.append(("  " * indent) + line)
+            for line in _reindent_comment(t.value, indent):
+                out.append(line)
             i += 1
             continue
 
