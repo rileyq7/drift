@@ -126,7 +126,11 @@ class Parser:
             elif t.value == 'import':
                 return self.parse_import()
 
-        raise ParseError("Expected 'agent', 'schema', 'config', or 'define verb'", t)
+        raise ParseError(
+            "Expected a top-level declaration: 'agent', 'schema', 'config', "
+            "'tool', 'pipeline', 'import', or 'define verb'",
+            t,
+        )
 
     def parse_import(self):
         """import X[, Y, ...] from "path"      | import { a, b } from "path" """
@@ -303,6 +307,17 @@ class Parser:
     def parse_tool(self):
         """tool name from mcp "url"      | tool name from python "mod:fn" | tool name { ... }"""
         self.eat_ident('tool')
+        if self.check(TT.TYPE_IDENT):
+            # Unlike agent/schema/pipeline names, tool names are snake_case
+            # — a natural `tool Foo from mcp ...` hits this, not the generic
+            # "Expected IDENT" the eat() below would otherwise raise.
+            raise ParseError(
+                f"Tool names must be snake_case, not PascalCase like "
+                f"{self.peek().value!r} — agent/schema/pipeline names are "
+                f"PascalCase, but tool names follow the same convention as "
+                f"variables and step names",
+                self.peek(),
+            )
         name = self.eat(TT.IDENT).value
         tool = ast.ToolDecl(name=name)
 
@@ -528,7 +543,12 @@ class Parser:
             elif t.type == TT.IDENT and t.value == 'memory':
                 agent.memory_config = self.parse_memory_config()
             else:
-                raise ParseError(f"Unexpected token in agent body", t)
+                raise ParseError(
+                    "Unexpected token in agent body — expected 'model', "
+                    "'budget', 'quality', 'state', 'memory', or a "
+                    "(optionally 'cached'/'manual'/'silent'-prefixed) 'step'",
+                    t,
+                )
 
             self.skip_newlines()
 

@@ -247,3 +247,30 @@ class TestErrors:
         # Was xfail — now parses.
         p = parse('tool t from mcp "x"')
         assert p.declarations[0].kind == "mcp"
+
+    def test_unknown_top_level_lists_all_seven_keywords(self):
+        # Regression: the message used to name only 4 of the 7 valid
+        # top-level keywords, misleadingly implying 'tool'/'pipeline'/
+        # 'import' weren't valid.
+        with pytest.raises(ParseError) as exc_info:
+            parse('toll t from mcp "x"')
+        msg = str(exc_info.value)
+        for kw in ("agent", "schema", "config", "tool", "pipeline",
+                   "import", "define verb"):
+            assert kw in msg
+
+    def test_unexpected_agent_body_token_lists_valid_fields(self):
+        with pytest.raises(ParseError) as exc_info:
+            parse('agent A { bogus_field: 1 step f() { respond "x" } }')
+        msg = str(exc_info.value)
+        for kw in ("model", "budget", "quality", "state", "memory", "step"):
+            assert kw in msg
+
+    def test_pascalcase_tool_name_gets_specific_error(self):
+        # Tool names are snake_case, unlike agent/schema/pipeline names —
+        # this used to surface as a generic "Expected IDENT" mismatch.
+        with pytest.raises(ParseError) as exc_info:
+            parse('tool Foo from mcp "x"')
+        msg = str(exc_info.value)
+        assert "snake_case" in msg
+        assert "Foo" in msg
