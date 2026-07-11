@@ -8,12 +8,19 @@ import os
 
 import pytest
 
-from drift.mcp_server import _run, _check, _transpile
+from drift.mcp_server import _run, _check, _transpile, _transpile_result
 
 
 HELLO = (
     'agent Hi { step greet(name: string) -> string { '
     'respond "Hi {name}" return "Hi {name}" } }'
+)
+
+SCHEDULE_PIPELINE = (
+    'pipeline Triage {\n'
+    '  schedule: "every morning"\n'
+    '  input_email -> Classifier.tag\n'
+    '}\n'
 )
 
 
@@ -72,6 +79,33 @@ class TestDriftRun:
         # The transient program module must not linger in sys.modules.
         assert ("drift_mcp_program" in sys.modules) == had
 
+    @pytest.mark.asyncio
+    async def test_run_returns_outputs_not_raw_banner(self, monkeypatch):
+        # Ergonomics: `respond` output is genuinely useful info (distinct
+        # from the step's return value) but used to be buried unstructured
+        # inside a `banner` field that was otherwise pure duplicate text
+        # (box-drawing header, re-printed cost report) paid on every call.
+        # It should now be its own structured field, and `banner` gone.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(HELLO, '{"name": "Riley"}')
+        assert result["outputs"] == ["Hi Riley"]
+        assert "banner" not in result
+
+    @pytest.mark.asyncio
+    async def test_run_reports_outputs_on_partial_failure(self, monkeypatch):
+        # respond output produced before a mid-step failure shouldn't be
+        # lost — it's exactly the kind of partial-progress signal a caller
+        # debugging a StepFailed wants.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        source = (
+            'agent Hi { step greet(name: string) -> string { '
+            'respond "trying..." fail "not implemented" } }'
+        )
+        result = await _run(source, '{"name": "Riley"}')
+        assert result["ok"] is False
+        assert result["outputs"] == ["trying..."]
+        assert "banner" not in result
+
 
 class TestCheckAndTranspile:
     def test_check_ok(self):
@@ -80,3 +114,34 @@ class TestCheckAndTranspile:
     def test_transpile_emits_python(self):
         py = _transpile(HELLO)
         assert "class Hi" in py
+
+    def test_check_failure_uses_error_field_not_message(self):
+        # Regression: _check used to return "message" for failure text
+        # while drift_run/drift_transpile use "error" — a caller writing
+        # one generic `if not ok: report(result["error"])` handler across
+        # all three tools would KeyError on a _check failure.
+        result = _check('agent Hi { step f() { let x = "unterminated } }')
+        assert result["ok"] is False
+        assert "error" in result
+        assert "message" not in result
+
+    def test_transpile_result_catches_codegen_error(self):
+        # Regression: drift_transpile's MCP handler only caught
+        # (LexError, ParseError), so a construct that parses but can't
+        # compile (e.g. an unimplemented `schedule:` pipeline modifier)
+        # would raise CodegenError uncaught out of call_tool instead of
+        # the same clean {ok: false, ...} shape drift_check/drift_run give
+        # it for the identical input.
+        result = _transpile_result(SCHEDULE_PIPELINE)
+        assert result["ok"] is False
+        assert "schedule" in result["error"]
+        assert "not implemented" in result["error"]
+
+    def test_check_and_transpile_result_agree_on_codegen_failure(self):
+        # Same source, same failure class — both tools should report it
+        # the same way (same field names, same message), not diverge.
+        check_result = _check(SCHEDULE_PIPELINE)
+        transpile_result = _transpile_result(SCHEDULE_PIPELINE)
+        assert check_result["ok"] is False
+        assert transpile_result["ok"] is False
+        assert check_result["error"] == transpile_result["error"]

@@ -1554,10 +1554,11 @@ async def run_agent(agent_class: type, step_name: str = None,
     and prints the cost report.
 
     `cost_out`, if given, is filled in-place with a structured cost snapshot
-    (`total_cost`, `budget`, `currency`, `calls`) on both success and failure
-    — callers that need cost data beyond the printed summary (e.g. the MCP
-    server, which can't rely on a human being able to read stdout) pass a
-    dict here instead of re-deriving agent/step discovery themselves.
+    (`total_cost`, `budget`, `currency`, `calls`) plus `outputs` (the agent's
+    `respond`-statement lines, i.e. `agent._outputs`) on both success and
+    failure — callers that need this beyond the printed summary (e.g. the
+    MCP server, which can't rely on a human being able to read stdout) pass
+    a dict here instead of re-deriving agent/step discovery themselves.
     """
     agent = agent_class()
     inputs = inputs or {}
@@ -1612,6 +1613,7 @@ async def run_agent(agent_class: type, step_name: str = None,
             'budget': tracker.budget.max_per_run,
             'currency': tracker.budget.currency,
             'calls': list(tracker.call_log),
+            'outputs': list(agent._outputs),
         }
 
     try:

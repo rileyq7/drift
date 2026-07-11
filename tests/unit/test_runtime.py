@@ -413,6 +413,26 @@ class TestRunAgentCostOut:
         assert cost["calls"][0]["model"] == "mock-model"
 
     @pytest.mark.asyncio
+    async def test_cost_out_includes_respond_outputs(self):
+        # cost_out also carries `outputs` (agent._outputs, the respond-
+        # statement lines) — callers that can't rely on a human reading
+        # stdout (e.g. the MCP server) need this as structured data too,
+        # not just the numeric cost fields.
+        class Narrates(Agent):
+            def __init__(self):
+                super().__init__(name="Narrates", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def go(self):
+                self.output("step one")
+                self.output("step two")
+                return "done"
+
+        cost = {}
+        await run_agent(Narrates, cost_out=cost)
+        assert cost["outputs"] == ["step one", "step two"]
+
+    @pytest.mark.asyncio
     async def test_cost_out_filled_and_exception_tagged_on_budget_exceeded(self):
         class Overspends(Agent):
             def __init__(self):

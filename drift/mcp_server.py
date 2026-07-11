@@ -42,6 +42,20 @@ def _transpile(source: str) -> str:
     )
 
 
+def _transpile_result(source: str) -> dict:
+    """The drift_transpile tool's logic, standalone so it's unit-testable
+    without spinning up the stdio server. Must catch CodegenError alongside
+    LexError/ParseError — a construct that parses but can't compile (e.g.
+    `~>`/`parallel step`/`schedule:`) would otherwise propagate uncaught out
+    of call_tool instead of the same clean {ok: false, ...} shape
+    drift_check/drift_run give it."""
+    try:
+        py = _transpile(source)
+        return {"ok": True, "python": py}
+    except (LexError, ParseError, CodegenError) as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _check(source: str) -> dict:
     """Validate syntax AND that it lowers to Python (codegen runs, output
     discarded), so constructs that parse but can't be compiled — e.g. `~>`/
@@ -51,24 +65,39 @@ def _check(source: str) -> dict:
         program = Parser(tokens).parse()
         CodeGenerator().generate(program)
     except LexError as e:
-        return {"ok": False, "kind": "lex", "message": str(e), "line": e.line, "col": e.col}
+        # `error`, not `message` — matches drift_run/drift_transpile, so a
+        # caller can use one `if not ok: report(result["error"])` handler
+        # across all three tools instead of needing per-tool field lookups.
+        return {"ok": False, "kind": "lex", "error": str(e), "line": e.line, "col": e.col}
     except ParseError as e:
         tok = e.token
         return {
             "ok": False, "kind": "parse",
-            "message": str(e),
+            "error": str(e),
             "line": tok.line, "col": tok.col,
         }
     except CodegenError as e:
-        return {"ok": False, "kind": "codegen", "message": str(e)}
+        return {"ok": False, "kind": "codegen", "error": str(e)}
     return {"ok": True}
+
+
+def _split_cost_and_outputs(snapshot: dict | None) -> tuple[dict | None, list]:
+    """run_agent's cost_out bundles cost numbers and `respond`-statement
+    output into one dict (see run_agent's docstring) — split them into the
+    two separate top-level response fields drift_run actually returns."""
+    if not snapshot:
+        return snapshot, []
+    outputs = snapshot.pop('outputs', [])
+    return snapshot, outputs
 
 
 async def _run(source: str, input_json: str | None = None) -> dict:
     """Transpile + exec a Drift program against the runtime. Returns
-    {ok, result?, cost?, banner?, error?, stage?, kind?} — `cost` is a
-    {total_cost, budget, currency, calls} snapshot, present on both success
-    and a "run"-stage failure (a run can spend real money before failing).
+    {ok, result?, cost?, outputs?, error?, stage?, kind?} — `cost` is a
+    {total_cost, budget, currency, calls} snapshot and `outputs` is the
+    list of `respond`-statement lines the agent printed, both present on
+    success and on a "run"-stage failure (a run can spend real money and
+    produce partial output before failing).
 
     Async because it awaits the agent directly: the MCP server calls this from
     an already-running event loop, so `asyncio.run()` here would raise
@@ -108,7 +137,12 @@ async def _run(source: str, input_json: str | None = None) -> dict:
             agent_cls = next(iter(agents.values()))
             inputs = json.loads(input_json) if input_json else {}
 
-            # Capture stdout so the run banner doesn't pollute the MCP channel.
+            # Capture stdout so the run banner (box-drawing header, printed
+            # cost report, etc.) doesn't pollute the MCP channel. Its
+            # content is otherwise fully redundant with the structured
+            # `cost`/`result`/`outputs` fields below, so it's discarded
+            # rather than returned — a calling agent shouldn't have to pay
+            # context tokens re-parsing box-drawing on every call.
             old_out = sys.stdout
             buf = io.StringIO()
             sys.stdout = buf
@@ -132,23 +166,26 @@ async def _run(source: str, input_json: str | None = None) -> dict:
                     kind = "business-logic"
                 else:
                     kind = "bug"
+                cost_snapshot, outputs = _split_cost_and_outputs(
+                    getattr(e, "_drift_cost", cost or None)
+                )
                 return {
                     "ok": False,
                     "stage": "run",
                     "kind": kind,
                     "error": f"{type(e).__name__}: {e}",
-                    "cost": getattr(e, "_drift_cost", cost or None),
-                    "banner": buf.getvalue(),
+                    "cost": cost_snapshot,
+                    "outputs": outputs,
                 }
             finally:
                 sys.stdout = old_out
 
-            banner = buf.getvalue()
+            cost_snapshot, outputs = _split_cost_and_outputs(cost)
             return {
                 "ok": True,
                 "result": _to_jsonable(result),
-                "cost": cost,
-                "banner": banner,
+                "cost": cost_snapshot,
+                "outputs": outputs,
             }
         finally:
             # Restore/clear the module slot we hijacked so concurrent or
@@ -194,7 +231,13 @@ def serve_stdio():
         return [
             types.Tool(
                 name="drift_check",
-                description="Validate Drift source code. Returns {ok, kind, message, line, col} on failure.",
+                description=(
+                    "Validate Drift source code — free (no LLM calls), catches syntax and "
+                    "codegen errors before spending run budget. Prefer this over drift_run "
+                    "as a first pass when iterating on a program. Returns {ok: true} on "
+                    "success, or {ok: false, kind, error, line, col} on failure, where kind "
+                    "is one of lex/parse/codegen."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {"source": {"type": "string", "description": "Drift program source"}},
@@ -213,9 +256,14 @@ def serve_stdio():
             types.Tool(
                 name="drift_run",
                 description=(
-                    "Transpile and execute a Drift program. Optional `input` is a JSON object "
-                    "mapping step parameter names to values. Returns the step's result plus the "
-                    "captured run banner (cost report etc.)."
+                    "Transpile and execute a Drift program (this spends real LLM budget — "
+                    "run drift_check first to catch syntax/codegen errors for free). Optional "
+                    "`input` is a JSON object mapping step parameter names to values, passed "
+                    "as a JSON-encoded string. Returns {ok, result, cost, outputs} on success "
+                    "— cost is {total_cost, budget, currency, calls}, outputs is the list of "
+                    "the agent's `respond`-statement lines — or {ok: false, stage, kind, error, "
+                    "cost, outputs} on failure, where kind is one of budget/auth/business-logic/"
+                    "bug and cost/outputs reflect spend and output produced before the failure."
                 ),
                 inputSchema={
                     "type": "object",
@@ -233,11 +281,7 @@ def serve_stdio():
         if name == "drift_check":
             result = _check(arguments["source"])
         elif name == "drift_transpile":
-            try:
-                py = _transpile(arguments["source"])
-                result = {"ok": True, "python": py}
-            except (LexError, ParseError) as e:
-                result = {"ok": False, "error": str(e)}
+            result = _transpile_result(arguments["source"])
         elif name == "drift_run":
             result = await _run(arguments["source"], arguments.get("input"))
         else:
