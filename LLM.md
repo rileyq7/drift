@@ -379,6 +379,8 @@ let drafted = generate a friendly reply considering tone, length as string
 
 Every intent call needs an `as` clause naming the result type. The clauses after `as` (`from`, `in`, `against`, `to`, `using`, `considering`, `with`) attach context to the LLM call. Their values can be variables, expressions, or comma-separated lists.
 
+A bare (unquoted) multi-word input like `generate a warm one-sentence greeting as string` is free-form English collected up to the next clause keyword — the actual LLM prompt text preserves hyphenated words correctly (`one-sentence` stays `one-sentence`, not `one - sentence`). `drift fmt`, however, only tokenizes (it doesn't parse), so it can't tell a hyphen inside such a description apart from a subtraction operator and will visually rewrite `one-sentence` to `one - sentence` in the `.drift` file itself — cosmetic only (idempotent, and the prompt text stays correct when re-parsed), but if you want to avoid the visual churn, prefer a quoted string (`generate a warm "one-sentence" greeting`) or reword without the hyphen.
+
 `confident<T>` is enabled by suffixing the type:
 ```drift
 let scored = rate company against criteria as confident<FitScore>

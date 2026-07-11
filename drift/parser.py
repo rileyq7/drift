@@ -1508,14 +1508,31 @@ class Parser:
                             # Single identifier — parse as variable
                             intent.input_expr = self.parse_postfix()
                         else:
-                            # Multi-word description — collect until clause keyword
+                            # Multi-word description — collect until clause keyword.
+                            # This is free-form English, but the lexer doesn't know
+                            # that: a hyphenated word like `one-sentence` or
+                            # `state-of-the-art` tokenizes as IDENT MINUS IDENT
+                            # (indistinguishable from subtraction at this point),
+                            # so joining every token with a space would turn it
+                            # into "one - sentence" in the actual LLM prompt text.
+                            # A bare `-` never means subtraction inside a
+                            # multi-word description (a real subtraction
+                            # expression would have matched the single-variable
+                            # branch above instead), so rejoin it tight against
+                            # its neighbors rather than space-separated.
                             words = []
                             while (not self.at_end() and
                                    self.peek().type not in (TT.NEWLINE, TT.RBRACE, TT.EOF) and
                                    not (self.peek().type == TT.IDENT and
                                         self.peek().value in INTENT_CLAUSE_KEYWORDS)):
                                 words.append(self.eat().value)
-                            intent.input_expr = ast.StringLit(value=" ".join(words))
+                            text = words[0] if words else ""
+                            for w in words[1:]:
+                                if w == '-' or (text and text[-1] == '-'):
+                                    text += w
+                                else:
+                                    text += " " + w
+                            intent.input_expr = ast.StringLit(value=text)
                     else:
                         intent.input_expr = self.parse_postfix()
 

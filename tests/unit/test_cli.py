@@ -8,7 +8,7 @@ import argparse
 
 import pytest
 
-from drift.cli import cmd_check, cmd_transpile, _run_once
+from drift.cli import cmd_check, cmd_transpile, cmd_new, cmd_fmt, _run_once
 
 
 SCHEDULE_PIPELINE = (
@@ -21,7 +21,8 @@ SCHEDULE_PIPELINE = (
 
 def _args(file, **overrides):
     ns = argparse.Namespace(file=file, output=None, step=None, agent=None,
-                             pipeline=None, input=None, trace=False, watch=False)
+                             pipeline=None, input=None, trace=False, watch=False,
+                             check=False, stdout=False)
     for k, v in overrides.items():
         setattr(ns, k, v)
     return ns
@@ -65,3 +66,26 @@ class TestCodegenErrorSurfacing:
         assert "Runtime error" not in out
         assert "schedule" in out
         assert "not implemented" in out
+
+
+class TestNewScaffold:
+    """`drift new` output should pass `drift check` and `drift fmt --check`
+    cleanly out of the box — an LLM agent scaffolding a project and then
+    sanity-checking it shouldn't hit a false-alarm-looking fmt failure on
+    a template it never touched."""
+
+    def test_scaffold_passes_check_and_fmt_check(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        cmd_new(argparse.Namespace(name="proj", model=None))
+        capsys.readouterr()
+
+        drift_file = tmp_path / "proj" / "proj.drift"
+        assert drift_file.exists()
+
+        cmd_check(_args(str(drift_file)))  # no SystemExit on success
+        out = capsys.readouterr().out
+        assert "syntax OK" in out
+
+        cmd_fmt(_args(str(drift_file), check=True))
+        out = capsys.readouterr().out
+        assert "already formatted" in out

@@ -1,6 +1,5 @@
 -- {name}.drift — your first Drift agent
 -- Run it: drift run {name}.drift --input '{{"name":"Riley"}}'
-
 config {{
   name: "{name}"
   version: "0.1.0"
@@ -9,9 +8,8 @@ config {{
 agent {Name} {{
   model: "{model}"
   budget: $0.10 per run
-
   step greet(name: string) -> string {{
-    let message = generate a warm one-sentence greeting as string
+    let message = generate a warm single sentence greeting as string
     respond "Hello, {{name}}!"
     return message
   }}
