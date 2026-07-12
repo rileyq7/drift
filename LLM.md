@@ -119,6 +119,18 @@ schema Name {
 - Schemas become Python dataclasses at codegen.
 - Use a schema as a step's return type to force structured output from an intent verb.
 
+### 7.1 Constructing a schema value directly
+
+Most schema instances come from an intent verb's `as <Schema>` result — but to build one yourself (e.g. to `return` a value assembled from pieces rather than straight from an LLM call), use `SchemaName { field: value, ... }`:
+```drift
+return Outcome {
+  ticket_id: ticket_id,
+  category: scored.value.category,
+  action: "responded"
+}
+```
+Fields can be comma-separated on one line or newline-separated across multiple lines — both work. This is the only reliable constructor form. `SchemaName(field: value, ...)` (parens instead of braces) also parses and works *on a single line*, but breaks with a `ParseError` the moment a newline appears inside the parens — since multi-field constructors are almost always written multi-line for readability, prefer `{ }` and don't use the paren form at all.
+
 ---
 
 ## 8. `agent` declaration
@@ -313,8 +325,8 @@ Error types (PascalCase, matched against runtime exception classes):
 - `StepFailed`
 - `SchemaViolation`
 - `ModelUnavailable`
-- `DriftError` (base class — catches everything below it)
-- `any error` — catch-all default arm
+- `DriftError` (base class — catches only the Drift runtime exceptions listed above, not exceptions from tool calls or external I/O)
+- `any error` — genuinely catches anything (`except Exception`), including non-`DriftError` exceptions like network errors from a REST/MCP tool call, exceptions raised by a `python`-kind tool's own code, or file I/O errors from `drift/io`. This is the arm to use around a `tool` call if you want the attempt block to survive an API outage or similar external failure — `DriftError` alone will not catch those.
 
 Inside a recover arm:
 - `retry` — restart the attempt block
@@ -380,6 +392,13 @@ let drafted = generate a friendly reply considering tone, length as string
 Every intent call needs an `as` clause naming the result type. The clauses after `as` (`from`, `in`, `against`, `to`, `using`, `considering`, `with`) attach context to the LLM call. Their values can be variables, expressions, or comma-separated lists.
 
 A bare (unquoted) multi-word input like `generate a warm one-sentence greeting as string` is free-form English collected up to the next clause keyword — the actual LLM prompt text preserves hyphenated words correctly (`one-sentence` stays `one-sentence`, not `one - sentence`). `drift fmt`, however, only tokenizes (it doesn't parse), so it can't tell a hyphen inside such a description apart from a subtraction operator and will visually rewrite `one-sentence` to `one - sentence` in the `.drift` file itself — cosmetic only (idempotent, and the prompt text stays correct when re-parsed), but if you want to avoid the visual churn, prefer a quoted string (`generate a warm "one-sentence" greeting`) or reword without the hyphen.
+
+**Clause-keyword trap (more serious — silently drops text, not just visual churn).** If a bare multi-word description contains one of the 8 clause keywords (`as`, `from`, `in`, `against`, `to`, `using`, `considering`, `with`) as an ordinary English word — e.g. `generate a reply to this ticket as string`, where "to" is just part of the sentence — the parser has no way to tell that apart from an intentional new clause. It truncates your description at that word (`input_data` becomes just `"a reply"`) and starts parsing `this ticket ... as string` as a new clause/statement, which can silently produce nonsense or a confusing parse/codegen error far from the real cause. **Always wrap a multi-word description in a quoted string** to make it unambiguous:
+```drift
+let reply = generate "a reply to this ticket" as string        -- correct
+let reply = generate a reply to this ticket as string           -- WRONG: truncates at "to"
+```
+This is not optional style advice — an unquoted description containing any of the 8 keywords is a real correctness bug waiting to happen, not just a formatting quirk.
 
 `confident<T>` is enabled by suffixing the type:
 ```drift
@@ -458,7 +477,11 @@ Operators (what codegen actually emits today):
 - `=>` **parallel fan-out** — the previous node's output must be iterable; the next node runs concurrently over each item via `asyncio.gather`. Not "strict sequential".
 - `~>` conditional and `|>` stream — **not implemented.** Both parse (the grammar accepts them) but codegen raises `CodegenError` the moment it sees one as a pipeline edge, at `drift check`/`transpile`/`run` time — there is no silent fallback. Don't emit these; use `->` or `=>` instead. (Note: `|>` *inside an expression*, e.g. `x |> f |> g`, is a separate, working function-composition pipe — unrelated to `|>` as a pipeline edge.)
 
-Each node is a step name (current file's first agent) or `Agent.step` (any agent). Pipelines run via `drift run --pipeline <name>`.
+Each node is a step name (current file's first agent) or `Agent.step` (any agent) — **every node, including the first, must be a real declared step.** There's no syntax for "start the pipeline with this raw data" — if you need the pipeline's `--input` to become the starting value, declare an entry step that takes it as a parameter and returns it (or transforms it), e.g. `step tickets(batch: list<Ticket>) -> list<Ticket> { return batch }`, then start the pipeline with `tickets => ...`. A bare identifier that isn't a step name (like a variable) still parses — it's read as `<first-agent>.<that-name>` — but fails at runtime with an `AttributeError` since no such step exists.
+
+**`--input` for `--pipeline` runs works differently than for a plain agent run.** For a plain `drift run file.drift --input '{"name": "Riley"}'`, the JSON is mapped to the step's parameters *by name* (`step(name="Riley")`) — this is NOT true for pipelines. For `drift run file.drift --pipeline P --input '...'`, the parsed JSON is passed as a single positional value to the entry node's one parameter, whole and unmapped — `--input '{"batch": [...]}'` does NOT become `tickets(batch=[...])`; it becomes `tickets({"batch": [...]})`, the *whole* dict as the value of `batch`. If your entry step takes one parameter, pass `--input` as exactly that parameter's shape directly (e.g. `--input '[{"ticket_id": "T-1", ...}, ...]'` for `step tickets(batch: list<Ticket>)`), not wrapped in an object keyed by the parameter name.
+
+Pipeline run via `drift run --pipeline <name>`. JSON object/dict values passed via `--input` (for both plain and `--pipeline` runs) ARE coerced into declared schema types — a `Schema`-typed parameter receives a real dataclass instance (attribute access like `param.field` works), not a bare `dict`.
 
 ### 12.1 Pipeline modifiers
 
@@ -522,17 +545,19 @@ import { chunk, tokenize, similarity, embed } from "drift/text"
 import { log, trace, metric, cost_report } from "drift/observe"
 ```
 
-Use any imported function as a normal call inside step bodies. Examples:
-- `notify.email(to: "x@y.com", subject: "...", body: "...")`
-- `time.wait(2.0)` — async, awaitable
-- `safety.redact_pii(user_message)`
-- `io.fetch_url("https://...")` — async
-- `text.chunk(long_doc, max_chars: 2000)`
+Use any imported function as a **bare call** inside step bodies — the import brings the function name itself into scope, not a namespaced module object. There is no `io.`/`notify.`/`time.`/etc. prefix at the call site, even though the `from` clause says `"drift/io"`; `import { fetch_url } from "drift/io"` makes `fetch_url` callable directly. (`io.fetch_url(...)` looks natural by analogy to the tool-call syntax in §11, but tools bind a namespaced object while stdlib imports don't — writing the prefix is a `NameError` at runtime, not caught by `drift check`.) Examples:
+- `email(to: "x@y.com", subject: "...", body: "...")`
+- `wait(2.0)` — async, awaitable
+- `redact_pii(user_message)`
+- `fetch_url("https://...")` — async
+- `chunk(long_doc, max_chars: 2000)`
 
-Stubs vs real, per function:
-- **Real:** everything in `drift/io` (`read`, `write`, `fetch_url`, `load_pdf`, `load_csv`), all of `drift/safety`, all of `drift/data`, `notify.webhook` (raises on 4xx/5xx), `time.now`/`time.wait`/`time.deadline`, `text.chunk`/`text.tokenize`/`text.similarity`.
-- **Stub (logs/prints, no real backend):** `notify.email`, `notify.slack`, `notify.push`, all of `drift/observe` (`log`, `trace`, `metric`; `cost_report` wraps a real `CostTracker.summary()` when one exists, otherwise stubs too).
-- **Stub by design (raises, doesn't silently no-op):** `text.embed` raises `NotImplementedError`. `time.schedule` stores to an in-process registry only — there's no daemon/cron loop, so nothing ever fires it (see the pipeline `schedule:` note in §12.1 — same underlying gap).
+Only 3 stdlib functions are actually async and need to be called with `let x = <fn>(...)` inside a step (implicitly awaited by codegen) rather than assumed synchronous: `fetch_url`, `webhook`, `wait`. Every other stdlib function (including everything in `drift/safety`, `drift/data`, `drift/text`, `drift/observe`, and the rest of `drift/io`/`drift/notify`) is plain sync — calling it is a normal expression, nothing special.
+
+Stubs vs real, per function (named bare, matching the actual call syntax — module names below are just which import line each comes from, not part of the call):
+- **Real:** everything in `drift/io` (`read`, `write`, `fetch_url`, `load_pdf`, `load_csv`), all of `drift/safety`, all of `drift/data`, `webhook` (raises on 4xx/5xx), `now`/`wait`/`deadline` (from `drift/time`), `chunk`/`tokenize`/`similarity` (from `drift/text`).
+- **Stub (logs/prints, no real backend):** `email`, `slack`, `push` (from `drift/notify`), all of `drift/observe` (`log`, `trace`, `metric`; `cost_report` wraps a real `CostTracker.summary()` when one exists, otherwise stubs too).
+- **Stub by design (raises, doesn't silently no-op):** `embed` (from `drift/text`) raises `NotImplementedError`. `schedule` (from `drift/time`) stores to an in-process registry only — there's no daemon/cron loop, so nothing ever fires it (see the pipeline `schedule:` note in §12.1 — same underlying gap).
 
 If a `.drift` program depends on a stub actually delivering (an email arriving, a metric landing in a real dashboard), say so — don't assume "no error" means "it happened."
 
@@ -687,7 +712,7 @@ drift lex <file> | drift parse <file>            # debug
 drift mcp                                        # run as an MCP stdio server
 ```
 
-`drift run` auto-loads `.env` from the file's directory tree, transpiles to a `.py` next to the source, runs the first agent's first step (or `--step`/`--agent`/`--pipeline` if specified). `--input` takes a JSON object mapped to the step's parameters by name.
+`drift run` auto-loads `.env` from the file's directory tree, transpiles to a `.py` next to the source, runs the first agent's first step (or `--step`/`--agent`/`--pipeline` if specified). `--input` takes a JSON object mapped to the step's parameters by name — **except for `--pipeline` runs**, where `--input` is passed as a single positional value to the entry node instead; see §12 for the exact difference.
 
 **`drift mcp`** exposes Drift itself over MCP, for another coding agent (you, if invoked that way) to call instead of shelling out to the CLI: `drift_check(source)`, `drift_transpile(source)`, `drift_run(source, input?)`. Prefer `drift_check` first when iterating — it's free (no LLM calls) and catches lex/parse/codegen errors before `drift_run` would spend budget. `drift_run`'s response is `{ok, result, cost, outputs}` on success, or `{ok: false, stage, kind, error, cost, outputs}` on failure — `kind` is one of `budget`/`auth`/`business-logic`/`bug`, `cost` is `{total_cost, budget, currency, calls}` and reflects spend even when the run failed partway through, and `outputs` is the list of the agent's `respond`-statement lines (also present on failure, showing whatever printed before the error). All three tools use `error` (not `message`) for failure text, consistently. If you're calling Drift through an MCP connection rather than the CLI directly, prefer these tools over shelling out to `drift run`.
 

@@ -12,7 +12,7 @@ from drift.runtime import (
     Agent, step_decorator, Budget, ModelRouter, Intent,
     CostTracker, Checkpoint, Confident, MemoryStore, run_agent,
     make_memory_store, StreamThenRouter,
-    register_custom_verb,
+    register_custom_verb, coerce_arg,
     DriftError, StepFailed, SchemaViolation, BudgetExceeded,
     ModelUnavailable, RateLimited, AuthError,
 )
