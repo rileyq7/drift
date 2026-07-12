@@ -89,3 +89,71 @@ class TestNewScaffold:
         cmd_fmt(_args(str(drift_file), check=True))
         out = capsys.readouterr().out
         assert "already formatted" in out
+
+
+class TestCrossFileImportResolution:
+    """Regression: `import { X } from "./other.drift"` codegens to a plain
+    sibling-file Python import (gen_import's own docstring: "Sibling
+    .drift file -> strip dirs and extension"), which only works if (a)
+    the sibling's .py has been transpiled and (b) the sibling's directory
+    is importable. Neither was true for `drift run` before this fix —
+    running with a relative/absolute path from outside the .drift file's
+    own directory raised ModuleNotFoundError even with the dependency
+    manually pre-transpiled, and there was no auto-transpile of `.drift`
+    dependencies at all despite nothing in LLM.md's own `import` example
+    suggesting a manual pre-transpile step was needed."""
+
+    SCHEMA_SRC = 'schema Shared { name: string }\n'
+    MAIN_SRC = (
+        'import { Shared } from "./schema_dep.drift"\n'
+        'agent A { model: "claude-haiku" '
+        '  step f(item: Shared) -> string { return item.name } }'
+    )
+
+    def test_dependency_is_auto_transpiled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        (tmp_path / "schema_dep.drift").write_text(self.SCHEMA_SRC)
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(self.MAIN_SRC)
+
+        assert not (tmp_path / "schema_dep.py").exists()
+        rc = _run_once(_args(str(main_file), input='{"item": {"name": "widget"}}'))
+        assert rc == 0
+        assert (tmp_path / "schema_dep.py").exists()
+
+    def test_run_works_regardless_of_caller_cwd(self, tmp_path, monkeypatch):
+        # The bug: this worked when CWD == the .drift file's directory,
+        # and failed with ModuleNotFoundError from anywhere else — e.g.
+        # a repo root, which is how `drift run examples/apps/x.drift` is
+        # actually invoked in practice.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        (tmp_path / "schema_dep.drift").write_text(self.SCHEMA_SRC)
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(self.MAIN_SRC)
+
+        elsewhere = tmp_path.parent
+        monkeypatch.chdir(elsewhere)
+        rc = _run_once(_args(str(main_file), input='{"item": {"name": "widget"}}'))
+        assert rc == 0
+
+    def test_subdirectory_organized_import_resolves(self, tmp_path, monkeypatch):
+        # LLM.md §14's own SECOND documented example is a subdirectory
+        # import: `import GrantChecker from "./agents/checker.drift"`.
+        # gen_import strips the `agents/` prefix entirely (`from checker
+        # import GrantChecker` — no subdirectory in the generated import
+        # statement at all), so that subdirectory needs to be on sys.path
+        # too, not just the main file's own directory.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "checker.drift").write_text(self.SCHEMA_SRC)
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(
+            'import { Shared } from "./agents/checker.drift"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f(item: Shared) -> string { return item.name } }'
+        )
+
+        rc = _run_once(_args(str(main_file), input='{"item": {"name": "widget"}}'))
+        assert rc == 0
+        assert (agents_dir / "checker.py").exists()

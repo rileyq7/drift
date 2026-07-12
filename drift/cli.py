@@ -26,6 +26,7 @@ from drift.lexer import lex, LexError
 from drift.parser import Parser, ParseError
 from drift.codegen import CodeGenerator, CodegenError
 from drift.formatter import format_source
+from drift.ast_nodes import ImportDecl
 
 
 # ─── .env auto-loading ──────────────────────────────────────────────────
@@ -285,6 +286,57 @@ def cmd_transpile(args):
         sys.exit(1)
 
 
+def _transpile_drift_dependencies(program, drift_file: Path, seen: set) -> set:
+    """Recursively transpile `.drift` files referenced via `import { X }
+    from "./other.drift"` so their sibling .py exists before the importer
+    runs. gen_import resolves cross-file imports as plain sibling-file
+    Python imports (`from other import X`) with no runtime auto-transpile
+    of its own — without this, `drift run` on a file with a cross-file
+    import failed with ModuleNotFoundError even though nothing in LLM.md's
+    own `import` example suggests a manual pre-transpile step is needed.
+    `seen` (a set of resolved absolute paths) guards against re-transpiling
+    the same file twice in a diamond-shaped import graph and against
+    infinite recursion on a circular import.
+
+    Returns the set of directories (as resolved Paths) each transpiled
+    dependency lives in — gen_import strips the import path down to just
+    the target file's basename (`from ./agents/checker.drift` becomes
+    `from checker import X`, dropping the `agents/` prefix entirely, per
+    gen_import's own docstring), so a subdirectory-organized import (LLM.md
+    §14's own second example: `import GrantChecker from
+    "./agents/checker.drift"`) only resolves at runtime if that
+    subdirectory is itself on sys.path — not just the main file's own
+    directory. The caller adds every returned directory to sys.path.
+    """
+    dirs: set = set()
+    base_dir = drift_file.resolve().parent
+    for decl in program.declarations:
+        if not (isinstance(decl, ImportDecl) and decl.source_path.endswith(".drift")):
+            continue
+        dep_path = (base_dir / decl.source_path).resolve()
+        if dep_path in seen:
+            continue
+        if not dep_path.exists():
+            continue
+        seen.add(dep_path)
+        dirs.add(dep_path.parent)
+        dep_source = dep_path.read_text()
+        dep_tokens = lex(dep_source)
+        dep_program = Parser(dep_tokens).parse()
+        # Recurse first so transitive dependencies exist before this one
+        # is written (matters if this file's own codegen were ever made
+        # dependency-aware; harmless no-op today since gen_import doesn't
+        # validate against the target's actual exports).
+        dirs |= _transpile_drift_dependencies(dep_program, dep_path, seen)
+        dep_python = CodeGenerator().generate(dep_program).replace(
+            "Source: <drift_file>", f"Source: {dep_path}"
+        )
+        dep_py_path = dep_path.with_suffix('.py')
+        dep_py_path.write_text(dep_python)
+        print(f"  ✓ Transpiled dependency → {dep_py_path}")
+    return dirs
+
+
 def _run_once(args):
     """Transpile + execute a single time. Returns 0 on success, nonzero on failure."""
     source = read_source(args.file)
@@ -292,6 +344,7 @@ def _run_once(args):
         tokens = lex(source)
         parser = Parser(tokens)
         program = parser.parse()
+        dep_dirs = _transpile_drift_dependencies(program, Path(args.file), set())
         codegen = CodeGenerator()
         python_source = codegen.generate(program)
         python_source = python_source.replace(
@@ -309,7 +362,30 @@ def _run_once(args):
         spec = importlib.util.spec_from_file_location("drift_generated", py_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules['drift_generated'] = module
-        spec.loader.exec_module(module)
+        # A cross-file `import { X } from "./other.drift"` codegens to a
+        # plain `from other import X` (sibling-file resolution — see
+        # gen_import's docstring, which strips any subdirectory prefix
+        # down to just the target's basename), which only resolves if the
+        # sibling's transpiled .py is importable. Python's default import
+        # search uses the CWD/sys.path[0], not the .drift file's own
+        # directory (or a dependency's own subdirectory) — so `drift run
+        # some/dir/file.drift` from elsewhere raised ModuleNotFoundError
+        # even with the sibling already transpiled, and a
+        # subdirectory-organized import (LLM.md §14's own second example,
+        # `./agents/checker.drift`) would still fail even from the right
+        # CWD. Add the .drift file's own directory plus every dependency's
+        # directory so imports resolve regardless of the caller's CWD or
+        # how dependencies are organized into subdirectories, matching how
+        # --input/.env resolution already doesn't require the caller to
+        # `cd` first.
+        candidate_dirs = {py_path.resolve().parent} | dep_dirs
+        added_dirs = [str(d) for d in candidate_dirs if str(d) not in sys.path]
+        sys.path[0:0] = added_dirs
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            for d in added_dirs:
+                sys.path.remove(d)
 
         from drift.runtime.core import Agent, run_agent
         agents = {}

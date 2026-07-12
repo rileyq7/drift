@@ -527,7 +527,7 @@ Once declared, `evaluate` works like any built-in intent verb. Custom verbs use 
 import { GrantSchema, FitScore } from "./schemas.drift"
 import GrantChecker from "./agents/checker.drift"
 ```
-Pulls named declarations into the current file. Path is relative to the importing file.
+Pulls named declarations into the current file. Path is relative to the importing file. `drift run` automatically transpiles any `.drift` file reachable via `import` before running the importer, and resolves the generated Python correctly regardless of the importing file's own subdirectory or the caller's working directory — you don't need to manually `drift transpile` a dependency first, or `cd` into its directory. (`drift check`/`drift transpile` on the importer alone do NOT recurse into or validate the imported file — only `drift run` does the dependency walk, since only `drift run` actually executes the generated Python and needs the import to resolve.)
 
 ---
 
