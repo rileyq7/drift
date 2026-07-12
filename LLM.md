@@ -374,6 +374,9 @@ Verbs: `classify`, `extract`, `summarize`, `rate`, `generate`, `rewrite`, `answe
 - `summarize` — condenses text; pick when the result is mostly prose.
 - `generate` — produces new content; pick when nothing in the input maps directly to the output.
 - `answer` — Q&A over a context (`from <docs>`); pick when there's a question + a source.
+- `compare` / `decide` / `match` — weigh one thing against another; pick when the input is a single item and the schema's judgment depends on a second thing (criteria, a candidate, an alternative). Put the *other* thing in the `against` clause: `compare a against b as Comparison`, `decide option against criteria as Verdict`. Don't write `compare a, b as ...` — a comma-separated input list is only meaningful for `extract`'s field-name list (see below); for every other verb, a bare comma-separated *input* is collected as literal joined text (`"a , b"`), not a reference to each variable's value — pass the second item via `against` instead.
+- `rewrite` — transforms existing text; put style/tone guidance in `using <guidance>`.
+- `translate` — put the target language in `to <language>` (a string, quoted or a variable).
 
 When in doubt for "produce a full structured analysis from a single text input", `classify` and `extract` both work — they only differ in how the prompt is framed.
 

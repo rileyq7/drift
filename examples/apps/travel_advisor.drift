@@ -1,0 +1,57 @@
+-- travel_advisor.drift — weather-aware travel advisor
+--
+-- Fetches current conditions for a city (REST tool, GET with a query
+-- param not in the URL path), compares two destinations for a trip,
+-- translates the recommendation into the traveler's language, and
+-- forgets stale advice after giving fresh guidance. Retries the
+-- comparison call if rate-limited.
+config {
+  name: "Travel Advisor"
+  version: "0.1.0"
+}
+
+schema Destination {
+  city: string
+  notes: string
+}
+
+schema Comparison {
+  better_choice: string
+  reasoning: string
+}
+
+tool weather_api {
+  endpoint: "https://api.example.com/weather"
+  auth: env("WEATHER_API_KEY")
+  action current(city: string, units: string) -> dict {
+    GET "/current"
+  }
+}
+
+agent TravelAdvisor {
+  model: prefer "claude-haiku" fallback "gpt-4o-mini"
+  budget: $0.15 per run
+  memory: dendric("travel_advice")
+  step recommend(a: Destination, b: Destination, language: string) -> string {
+    attempt {
+      let comparison = compare a against b as Comparison
+      let advice = "Go with {comparison.better_choice}: {comparison.reasoning}"
+      let translated = translate advice to language as string
+      remember translated tagged "advice", a.city, b.city
+      forget memories older than 30d
+      respond "Recommendation: {translated}"
+      return translated
+    }
+    recover from {
+      RateLimited -> retry
+      any error -> {
+        respond "Comparison failed, falling back to a simple recommendation"
+        return "Consider both options and check current conditions before deciding."
+      }
+    }
+  }
+  step check_conditions(city: string) -> dict {
+    let conditions = weather_api.current(city: city, units: "metric")
+    return conditions
+  }
+}
