@@ -555,6 +555,8 @@ Use any imported function as a **bare call** inside step bodies — the import b
 - `fetch_url("https://...")` — async
 - `chunk(long_doc, max_chars: 2000)`
 
+**`drift/data`'s `filter_`/`group_by` (and `sort`/`deduplicate`'s optional `key` parameter) need a Python callable — Drift has no lambda/function-reference syntax, so there's no way to construct one from `.drift` source.** `filter_(items, predicate)` and `group_by(items, key)` always require a predicate/key argument, making them **effectively unusable** — passing a bare identifier there (e.g. `filter_(items, some_name)`) transpiles to a plain Python name reference that isn't a real function, and crashes with `NameError` at runtime (`drift check` doesn't catch it — it's syntactically a valid expression). `sort(items)` and `deduplicate(items)` work fine called **without** their optional `key` argument; `paginate(items, page, page_size)` takes no callable and always works. If you need custom filter/sort/group logic, do it with `if`/`for each` in a step body instead of reaching for `filter_`/`group_by`.
+
 Only 3 stdlib functions are actually async and need to be called with `let x = <fn>(...)` inside a step (implicitly awaited by codegen) rather than assumed synchronous: `fetch_url`, `webhook`, `wait`. Every other stdlib function (including everything in `drift/safety`, `drift/data`, `drift/text`, `drift/observe`, and the rest of `drift/io`/`drift/notify`) is plain sync — calling it is a normal expression, nothing special.
 
 Stubs vs real, per function (named bare, matching the actual call syntax — module names below are just which import line each comes from, not part of the call):
