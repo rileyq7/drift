@@ -1,0 +1,49 @@
+-- lead_qualifier.drift — sales lead qualification with memory
+--
+-- Scores an inbound lead against ICP fit criteria, recalling similar past
+-- leads for context before scoring and remembering the outcome afterward
+-- so future qualification calls benefit from prior decisions. Drafts
+-- outreach for qualified leads; flags low-confidence leads for human
+-- review instead of guessing.
+config {
+  name: "Lead Qualifier"
+  version: "0.1.0"
+}
+
+schema Lead {
+  company_name: string
+  industry: string
+  employee_count: int
+  use_case: string
+}
+
+schema LeadScore {
+  fit: one of "strong fit", "possible fit", "weak fit", "no fit"
+  reasoning: string
+  suggested_outreach_angle: string
+}
+
+agent LeadQualifier {
+  model: prefer "claude-sonnet" fallback "gpt-4o-mini"
+  budget: $0.15 per run
+  memory: dendric("sales_leads")
+  quality: 0.75 minimum confidence
+  step qualify(lead: Lead) -> LeadScore {
+    let past_context = recall "leads similar to {lead.company_name} in {lead.industry}" for "qualification"
+    let scored = rate lead against "ICP fit: mid-market to enterprise B2B SaaS companies with a clear automation use case, considering past_context" as confident<LeadScore>
+    if scored is confident {
+      respond "Qualified {lead.company_name}: {scored.value.fit}"
+      remember "{lead.company_name} ({lead.industry}, {lead.employee_count} employees): {scored.value.fit} — {scored.value.reasoning}" tagged "qualification", lead.industry
+      if scored.value.fit == "strong fit" or scored.value.fit == "possible fit" {
+        let outreach = generate "a short personalized outreach email opening line" using scored.value.suggested_outreach_angle, lead.company_name as string
+        respond "Outreach angle: {outreach}"
+      }
+      return scored.value
+    }
+    otherwise {
+      respond "Low confidence on {lead.company_name} — flagging for human review"
+      remember "{lead.company_name}: low-confidence result, needs human review" tagged "needs-review", lead.industry
+      fail "confidence below threshold — needs human review"
+    }
+  }
+}
