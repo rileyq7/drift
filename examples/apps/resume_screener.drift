@@ -1,0 +1,28 @@
+-- resume_screener.drift — parallel resume extraction and fit decisions
+--
+-- Extracts a structured profile from each candidate's resume text in
+-- parallel, then decides fit against a job spec for each. Demonstrates
+-- cross-file import (shared schemas), for-each-parallel fan-out, and the
+-- extract/decide intent verbs.
+import { Candidate, CandidateProfile, FitDecision } from "./candidate_schemas.drift"
+config {
+  name: "Resume Screener"
+  version: "0.1.0"
+}
+
+agent Screener {
+  model: "claude-haiku"
+  budget: $0.20 per run
+  step profile_candidates(candidates: list<Candidate>) -> list<CandidateProfile> {
+    let profiles = []
+    for each candidate in candidates parallel {
+      let profile = extract years_experience, key_skills, seniority from candidate.resume_text as CandidateProfile
+      profiles.add(profile)
+    }
+    return profiles
+  }
+  step decide_fit(profile: CandidateProfile, job_spec: string) -> FitDecision {
+    let decision = decide profile against job_spec as FitDecision
+    return decision
+  }
+}

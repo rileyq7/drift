@@ -1,0 +1,17 @@
+-- candidate_schemas.drift — shared schemas for the resume screener app,
+-- imported by resume_screener.drift to demonstrate cross-file import.
+schema Candidate {
+  name: string
+  resume_text: string
+}
+
+schema CandidateProfile {
+  years_experience: int
+  key_skills: list<string>
+  seniority: one of "junior", "mid", "senior", "staff"
+}
+
+schema FitDecision {
+  recommend: bool
+  reasoning: string
+}
