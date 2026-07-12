@@ -77,7 +77,7 @@ class GrantChecker(Agent):
         # Budget pre-check
         self.cost_tracker.pre_check()
 
-        past = self.memory.recall('similar evaluations', key=company_profile)
+        past = self.memory.recall("similar evaluations", key=company_profile)
         score = await self.intent(verb="compare_score", input_data=company_profile, output_schema=FitScore, criteria=call_text, context=past)
         self.memory.remember(score, tag="healthcare innovate_uk")
         _result = score

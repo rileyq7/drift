@@ -169,7 +169,9 @@ class TestIntentExpressions:
         d = parse(agent_src).declarations[0]
         intent = d.steps[0].body[0].value
         assert intent.verb == "translate"
-        assert intent.clauses["to"].value == "French"
+        # Clause values are always a list now (comma-separated values are
+        # documented to work for every clause, not just `considering`).
+        assert intent.clauses["to"][0].value == "French"
 
 
 class TestControlFlow:
@@ -230,6 +232,51 @@ class TestSchemaConstructor:
         assert isinstance(ret.value, ast.SchemaConstructor)
         assert ret.value.type_name == "Result"
         assert set(ret.value.fields) == {"name", "score"}
+
+
+class TestOperatorPrecedence:
+    """Regression: `and`/`or`/comparison operators (==, !=, <, >, <=, >=)
+    used to be flattened into ONE left-associative loop with no
+    precedence distinction — `x == "a" or x == "b"` silently miscompiled
+    to `((x == "a") or x) == "b"`, a real logic bug hit by the extremely
+    common `a == X or a == Y` pattern. `or` must bind loosest, `and`
+    tighter, comparisons tightest."""
+
+    def _condition(self, src_frag: str) -> ast.BinOp:
+        agent_src = f'agent A {{ step s() -> bool {{ if {src_frag} {{ return true }} return false }} }}'
+        d = single_decl(agent_src)
+        if_stmt = d.steps[0].body[0]
+        return if_stmt.condition
+
+    def test_or_binds_looser_than_equality(self):
+        # x == "a" or x == "b"  must be  (x == "a") or (x == "b")
+        cond = self._condition('x == "a" or x == "b"')
+        assert cond.op == "or"
+        assert cond.left.op == "=="
+        assert cond.left.right.value == "a"
+        assert cond.right.op == "=="
+        assert cond.right.right.value == "b"
+
+    def test_and_binds_looser_than_comparison(self):
+        cond = self._condition('x > 0 and y > 0')
+        assert cond.op == "and"
+        assert cond.left.op == ">"
+        assert cond.right.op == ">"
+
+    def test_and_binds_tighter_than_or(self):
+        # x == 1 and y == 2 or z == 3  must be  (x==1 and y==2) or (z==3)
+        cond = self._condition('x == 1 and y == 2 or z == 3')
+        assert cond.op == "or"
+        assert cond.left.op == "and"
+        assert cond.left.left.op == "=="
+        assert cond.left.right.op == "=="
+        assert cond.right.op == "=="
+
+    def test_multiple_or_clauses(self):
+        cond = self._condition('x == "a" or x == "b" or x == "c"')
+        assert cond.op == "or"
+        assert cond.right.op == "=="
+        assert cond.right.right.value == "c"
 
 
 class TestErrors:

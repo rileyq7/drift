@@ -143,6 +143,33 @@ class TestIntentCodegen:
         )
         assert 'input_data="a state-of-the-art summary"' in out
 
+    def test_with_clause_is_wired_up(self, transpile):
+        # Regression: `with` was a recognized clause keyword (parser
+        # consumed it into intent.clauses['with']) but codegen never read
+        # that key at all — the clause value was silently dropped, never
+        # reaching self.intent() or the actual LLM prompt.
+        out = self._step_body(
+            transpile, "summarize doc with formatting_notes as string"
+        )
+        assert "with_=formatting_notes" in out
+
+    def test_using_clause_accepts_comma_separated_list(self, transpile):
+        # LLM.md: "Their values can be variables, expressions, or
+        # comma-separated lists" for every clause — this used to be true
+        # only for `considering`; `using a, b` was a ParseError.
+        out = self._step_body(
+            transpile, "generate a reply using ctx1, ctx2 as string"
+        )
+        assert "context=[ctx1, ctx2]" in out
+
+    def test_single_value_from_clause_stays_unwrapped(self, transpile):
+        # A single value must NOT become a 1-item list — keeps the common
+        # case (`from doc`) passing a plain value, matching prior behavior
+        # and build_intent_prompt's existing single-value formatting.
+        out = self._step_body(transpile, 'answer "q" from doc as string')
+        assert "source=doc" in out
+        assert "source=[doc]" not in out
+
     def test_missing_as_clause_does_not_swallow_following_return(self, parse_ast):
         # Regression: the free-form description word-collection loop only
         # stopped at clause keywords (as/from/in/against/to/using/
@@ -174,6 +201,36 @@ class TestControlFlowCodegen:
         assert "if (x > 70):" in out
         assert "elif (x > 40):" in out
         assert "else:" in out
+
+    @pytest.mark.asyncio
+    async def test_or_of_equalities_evaluates_correctly_at_runtime(self, transpile, tmp_path):
+        # End-to-end proof (not just AST/text shape) that `x == "a" or
+        # x == "b"` actually evaluates as boolean-logic-correct — this is
+        # the exact pattern that used to silently miscompile to
+        # `((x == "a") or x) == "b"`.
+        src = (
+            'agent A { step classify_status(status: string) -> string { '
+            '  if status == "strong fit" or status == "possible fit" { '
+            '    return "qualified" '
+            '  } otherwise { '
+            '    return "not qualified" '
+            '  } '
+            '} }'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_precedence.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_precedence", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_precedence"] = mod
+        spec.loader.exec_module(mod)
+        agent = mod.A()
+
+        assert await agent.classify_status(status="strong fit") == "qualified"
+        assert await agent.classify_status(status="possible fit") == "qualified"
+        assert await agent.classify_status(status="weak fit") == "not qualified"
+        assert await agent.classify_status(status="no fit") == "not qualified"
 
     def test_for_each_sequential(self, transpile):
         src = (

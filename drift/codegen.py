@@ -1124,7 +1124,15 @@ class CodeGenerator:
 
     def gen_remember(self, stmt: ast.RememberStmt):
         val = self.gen_expr(stmt.value)
-        tag = self.gen_expr(stmt.tag) if stmt.tag is not None else '""'
+        if not stmt.tags:
+            tag = '""'
+        elif len(stmt.tags) == 1:
+            tag = self.gen_expr(stmt.tags[0])
+        else:
+            # Multiple `tagged "a", "b"` tags — pass as a list; both
+            # MemoryStore.remember (mock) and DendricStore.remember (real)
+            # accept a list and join it for storage/context.
+            tag = "[" + ", ".join(self.gen_expr(t) for t in stmt.tags) + "]"
         self.emit_line(f"self.memory.remember({val}, tag={tag})")
 
     def gen_deja_vu(self, stmt: ast.DejaVuStmt):
@@ -1243,7 +1251,14 @@ class CodeGenerator:
         if isinstance(expr, ast.IntentExpr):
             return self.gen_intent(expr)
         elif isinstance(expr, ast.RecallStmt):
-            desc = repr(expr.description)
+            # description is a real Expression now (StringLit with
+            # possible {var} interpolation, an Ident variable reference,
+            # or free-form text) — route through gen_expr like any other
+            # expression instead of repr()'ing raw text, which used to
+            # silently ignore both interpolation and variable references
+            # (`recall question for "advice"` recalled the literal string
+            # "question", never the variable's value).
+            desc = self.gen_expr(expr.description)
             key = self.gen_expr(expr.key) if expr.key is not None else "None"
             return f"self.memory.recall({desc}, key={key})"
         elif isinstance(expr, ast.FnCall):
@@ -1473,7 +1488,7 @@ class CodeGenerator:
 
         # Source (from 'from' clause)
         if 'from' in intent.clauses:
-            parts.append(f"source={self.gen_expr(intent.clauses['from'])}")
+            parts.append(f"source={self._gen_clause_value(intent.clauses['from'])}")
 
         # Count (from 'in' clause — "in 3 sentences")
         if 'in' in intent.clauses:
@@ -1486,15 +1501,19 @@ class CodeGenerator:
 
         # Criteria (from 'against' clause)
         if 'against' in intent.clauses:
-            parts.append(f"criteria={self.gen_expr(intent.clauses['against'])}")
+            parts.append(f"criteria={self._gen_clause_value(intent.clauses['against'])}")
 
         # Target (from 'to' clause)
         if 'to' in intent.clauses:
-            parts.append(f"target={self.gen_expr(intent.clauses['to'])}")
+            parts.append(f"target={self._gen_clause_value(intent.clauses['to'])}")
 
         # Context (from 'using' clause)
         if 'using' in intent.clauses:
-            parts.append(f"context={self.gen_expr(intent.clauses['using'])}")
+            parts.append(f"context={self._gen_clause_value(intent.clauses['using'])}")
+
+        # With (from 'with' clause)
+        if 'with' in intent.clauses:
+            parts.append(f"with_={self._gen_clause_value(intent.clauses['with'])}")
 
         # Factors (from 'considering' clause)
         if 'considering' in intent.clauses:
@@ -1504,3 +1523,17 @@ class CodeGenerator:
 
         args_str = ", ".join(parts)
         return f"await self.intent({args_str})"
+
+    def _gen_clause_value(self, values: list) -> str:
+        """`from`/`against`/`to`/`using`/`with` clauses always parse to a
+        list now (comma-separated values are documented to work for every
+        clause, not just `considering`). Unwrap a single-item list to the
+        bare value — keeps the common case (`from doc`) passing a plain
+        value to self.intent() exactly as before, so build_intent_prompt's
+        existing single-value formatting for source/criteria/target/context
+        is unaffected. Multiple values pass through as a real list, which
+        build_intent_prompt formats the same way it already does for
+        `considering`'s factors."""
+        if len(values) == 1:
+            return self.gen_expr(values[0])
+        return "[" + ", ".join(self.gen_expr(v) for v in values) + "]"

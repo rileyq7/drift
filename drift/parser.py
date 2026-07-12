@@ -994,39 +994,80 @@ class Parser:
         return ast.FailStmt(message=msg)
 
     def parse_recall(self):
-        """recall [similar] <free-text description> [for <expr>]
+        """recall [similar] <description> [for <expr>]
 
-        The description is collected as a string up to the `for` keyword,
-        newline, or end of statement. If `for` appears, the expression after
-        it becomes the lookup key (used for tag-based matching).
+        `description` follows the same disambiguation as an intent
+        expression's input (see parse_intent_expr): a quoted string
+        (with `{var}` interpolation support), a single bare identifier
+        (evaluated as a variable reference — `recall question for "advice"`
+        must recall based on question's runtime VALUE, not the literal
+        text "question"), or free-form words collected into a string.
+        If `for` appears, the expression after it becomes the lookup key.
         """
         self.eat_ident('recall')
-        words = []
         key_expr = None
+
         # Optional `similar` marker — no parse change, just absorb.
-        if self.check_ident('similar'):
+        had_similar = self.check_ident('similar')
+        if had_similar:
             self.eat()
-            words.append('similar')
+
+        if self.at_end() or self.peek().type in (TT.NEWLINE, TT.RBRACE, TT.EOF):
+            description = ast.StringLit(value="similar" if had_similar else "")
+        elif had_similar:
+            # `recall similar <...>` reads as the start of a descriptive
+            # phrase ("recall similar leads to this one") — always free
+            # text after `similar`, never single-identifier-as-variable
+            # disambiguation. Otherwise `recall similar leads for "x"`
+            # would treat the bare word "leads" as a variable reference
+            # (since it's directly followed by `for`) instead of the
+            # literal word it obviously is here.
+            description = self._parse_recall_free_text(had_similar)
+        else:
+            first = self.peek()
+            if first.type == TT.STRING:
+                description = self.parse_postfix()
+            elif first.type == TT.IDENT and first.value != 'for':
+                next_tok = self.peek_ahead(1)
+                if (next_tok.type in (TT.DOT, TT.LPAREN) or
+                        next_tok.type in (TT.NEWLINE, TT.RBRACE, TT.EOF) or
+                        (next_tok.type == TT.IDENT and next_tok.value == 'for')):
+                    # Single identifier (optionally with field access /
+                    # a call) — a variable reference, not literal text.
+                    description = self.parse_postfix()
+                else:
+                    description = self._parse_recall_free_text(had_similar)
+            else:
+                description = self._parse_recall_free_text(had_similar)
+
+        if self.check_ident('for'):
+            self.eat()
+            key_expr = self.parse_postfix()
+
+        return ast.RecallStmt(description=description, key=key_expr)
+
+    def _parse_recall_free_text(self, had_similar: bool) -> ast.StringLit:
+        words = ['similar'] if had_similar else []
         while (not self.at_end() and
-               self.peek().type not in (TT.NEWLINE, TT.RBRACE, TT.EOF)):
-            if self.peek().type == TT.IDENT and self.peek().value == 'for':
-                self.eat()
-                key_expr = self.parse_postfix()
-                break
+               self.peek().type not in (TT.NEWLINE, TT.RBRACE, TT.EOF) and
+               not (self.peek().type == TT.IDENT and self.peek().value == 'for')):
             words.append(self.eat().value)
-        return ast.RecallStmt(description=" ".join(words), key=key_expr)
+        return ast.StringLit(value=" ".join(words))
 
     def parse_remember(self):
-        """remember <expr> [tagged <expr>]"""
+        """remember <expr> [tagged <expr>[, <expr>, ...]]"""
         self.eat_ident('remember')
         # Collect the value expression — stop at `tagged` or end of line.
         # We use parse_postfix() to handle field access (result.value) cleanly.
         value = self.parse_postfix()
-        tag = None
+        tags = []
         if self.check_ident('tagged'):
             self.eat()
-            tag = self.parse_postfix()
-        return ast.RememberStmt(value=value, tag=tag)
+            tags.append(self.parse_postfix())
+            while self.check(TT.COMMA):
+                self.eat(TT.COMMA)
+                tags.append(self.parse_postfix())
+        return ast.RememberStmt(value=value, tags=tags)
 
     def parse_deja_vu(self):
         """deja_vu match on <expr> {
@@ -1280,13 +1321,38 @@ class Parser:
 
     def parse_pipe_expr(self):
         """expr |> fn |> fn"""
-        left = self.parse_comparison()
+        left = self.parse_or_expr()
         if self.check(TT.PIPE_ARROW):
             ops = []
             while self.check(TT.PIPE_ARROW):
                 self.eat(TT.PIPE_ARROW)
-                ops.append(self.parse_comparison())
+                ops.append(self.parse_or_expr())
             return ast.PipeExpr(input_expr=left, operations=ops)
+        return left
+
+    def parse_or_expr(self):
+        """`or` — loosest-binding boolean operator, so `a == x or a == y`
+        parses as `(a == x) or (a == y)`, not `((a == x) or a) == y`.
+
+        `and`/`or`/comparison operators used to be flattened into one
+        left-associative loop (parse_comparison) with no precedence
+        distinction at all — `x == "a" or x == "b"` silently miscompiled
+        to `((x == "a") or x) == "b"`, a real logic bug hit by any use of
+        the extremely common `a == X or a == Y` pattern."""
+        left = self.parse_and_expr()
+        while self.check_ident('or'):
+            self.eat()
+            right = self.parse_and_expr()
+            left = ast.BinOp(op='or', left=left, right=right)
+        return left
+
+    def parse_and_expr(self):
+        """`and` — binds tighter than `or`, looser than comparisons."""
+        left = self.parse_comparison()
+        while self.check_ident('and'):
+            self.eat()
+            right = self.parse_comparison()
+            left = ast.BinOp(op='and', left=left, right=right)
         return left
 
     def parse_comparison(self):
@@ -1318,10 +1384,6 @@ class Parser:
                 self.eat()
                 right = self.parse_addition()
                 left = ast.BinOp(op='!=', left=left, right=right)
-            elif t.type == TT.IDENT and t.value in ('and', 'or'):
-                op = self.eat().value
-                right = self.parse_addition()
-                left = ast.BinOp(op=op, left=left, right=right)
             elif t.type == TT.IDENT and t.value == 'is':
                 self.eat()
                 # "is confident", "is uncertain", "is between"
@@ -1566,15 +1628,20 @@ class Parser:
                     intent.clauses['in'] = {'count': count, 'unit': unit}
                 else:
                     intent.clauses['in'] = self.parse_postfix()
-            elif clause_key in ('from', 'against', 'to', 'using', 'with'):
-                intent.clauses[clause_key] = self.parse_postfix()
-            elif clause_key == 'considering':
-                # considering factor1, factor2, factor3
-                factors = [self.parse_postfix()]
+            elif clause_key in ('from', 'against', 'to', 'using', 'with', 'considering'):
+                # Every clause accepts a comma-separated list, per docs:
+                # "Their values can be variables, expressions, or
+                # comma-separated lists." Always store a list (even for a
+                # single value) so codegen/runtime formatting is uniform —
+                # `considering` already worked this way; the others used to
+                # take only a single parse_postfix() with no comma-loop,
+                # so e.g. `using a, b` was a ParseError despite being
+                # documented to work.
+                values = [self.parse_postfix()]
                 while self.check(TT.COMMA):
                     self.eat(TT.COMMA)
-                    factors.append(self.parse_postfix())
-                intent.clauses['considering'] = factors
+                    values.append(self.parse_postfix())
+                intent.clauses[clause_key] = values
 
         return intent
 

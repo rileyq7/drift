@@ -404,16 +404,24 @@ class RecallStmt:
     """recall [similar] <description> [for <key>] — wraps memory.recall().
 
     Always an expression (returns a list). Parsed at expression position.
+    `description` is a real Expression (StringLit with interpolation,
+    Ident for a bare variable reference, or a StringLit built from
+    collected free-form words) — NOT a raw string. A bare identifier
+    (`recall question for "advice"`, LLM.md's own documented example)
+    must evaluate `question`'s runtime value, not the literal text
+    "question".
     """
-    description: str = ""
+    description: 'Expression' = None
     key: 'Expression | None' = None
 
 
 @dataclass
 class RememberStmt:
-    """remember <expr> [tagged <key>] — wraps memory.remember()."""
+    """remember <expr> [tagged <tag>[, <tag>, ...]] — wraps memory.remember().
+    `tagged` accepts one or more comma-separated tags (LLM.md's own
+    documented example uses two: `tagged "advice", "user_123"`)."""
     value: 'Expression' = None
-    tag: 'Expression | None' = None
+    tags: list = field(default_factory=list)
 
 
 @dataclass

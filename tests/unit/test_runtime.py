@@ -154,6 +154,37 @@ class Result:
         assert 0 <= self.score <= 100, f"score out of range: {self.score}"
 
 
+class TestBuildIntentPromptClauses:
+    """`with` was a parsed clause keyword that codegen never read at all —
+    the value was silently dropped before ever reaching self.intent() or
+    build_intent_prompt. Also: every clause is documented to accept
+    comma-separated lists, not just `considering` — verify the prompt
+    text actually reflects multiple values, not just the first."""
+
+    def test_with_clause_appears_in_prompt(self):
+        from drift.runtime.core import build_intent_prompt
+        _system, prompt = build_intent_prompt(
+            "summarize", "doc text", with_="formatting notes",
+        )
+        assert "formatting notes" in prompt
+
+    def test_multi_value_context_clause_includes_all_values(self):
+        from drift.runtime.core import build_intent_prompt
+        _system, prompt = build_intent_prompt(
+            "generate", "a reply", context=["ctx one", "ctx two"],
+        )
+        assert "ctx one" in prompt
+        assert "ctx two" in prompt
+
+    def test_multi_value_target_clause_includes_all_values(self):
+        from drift.runtime.core import build_intent_prompt
+        _system, prompt = build_intent_prompt(
+            "translate", "doc", target=["French", "Spanish"],
+        )
+        assert "French" in prompt
+        assert "Spanish" in prompt
+
+
 class TestParseLLMResponse:
     def test_plain_string_passthrough(self):
         assert parse_llm_response("hello", output_schema=str) == "hello"

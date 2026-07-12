@@ -63,9 +63,54 @@ class TestRecallRememberParse:
         ).declarations[0]
         let_stmt = d.steps[0].body[0]
         assert isinstance(let_stmt.value, ast.RecallStmt)
-        assert "similar" in let_stmt.value.description
+        # description is a real Expression now (StringLit here, since
+        # "similar items" is free-form text after the `similar` marker),
+        # not a raw string.
+        assert isinstance(let_stmt.value.description, ast.StringLit)
+        assert "similar" in let_stmt.value.description.value
         # The `for topic` parses to an Ident
         assert let_stmt.value.key.name == "topic"
+
+    def test_bare_variable_description_is_a_variable_reference(self, parse_ast):
+        # Regression: LLM.md's own documented "Memory-aware agent" pattern
+        # is `let context = recall question for "advice"` — description
+        # used to be collected as raw joined text ("question", the
+        # identifier's NAME), so codegen emitted self.memory.recall(
+        # 'question', ...) — a literal string search for the word
+        # "question", completely disconnected from the actual runtime
+        # value of the `question` variable. A bare identifier must parse
+        # as a variable reference (Ident), evaluated at runtime.
+        d = parse_ast(
+            'agent A { memory { } '
+            'step f(question: string) { '
+            '  let context = recall question for "advice" '
+            '} }'
+        ).declarations[0]
+        let_stmt = d.steps[0].body[0]
+        assert isinstance(let_stmt.value.description, ast.Ident)
+        assert let_stmt.value.description.name == "question"
+
+    def test_quoted_description_supports_interpolation(self, parse_ast):
+        d = parse_ast(
+            'agent A { memory { } '
+            'step f(lead: string) { '
+            '  let context = recall "leads similar to {lead}" for "qualification" '
+            '} }'
+        ).declarations[0]
+        let_stmt = d.steps[0].body[0]
+        assert isinstance(let_stmt.value.description, ast.StringLit)
+        assert let_stmt.value.description.has_interpolation
+
+    def test_field_access_description_is_preserved(self, parse_ast):
+        d = parse_ast(
+            'agent A { memory { } '
+            'step f(lead: string) { '
+            '  let context = recall lead.use_case for "qualification" '
+            '} }'
+        ).declarations[0]
+        let_stmt = d.steps[0].body[0]
+        assert isinstance(let_stmt.value.description, ast.FieldAccess)
+        assert let_stmt.value.description.field_name == "use_case"
 
     def test_remember_tagged(self, parse_ast):
         d = parse_ast(
@@ -74,7 +119,20 @@ class TestRecallRememberParse:
         ).declarations[0]
         stmt = d.steps[0].body[0]
         assert isinstance(stmt, ast.RememberStmt)
-        assert stmt.tag.value == "note"
+        assert len(stmt.tags) == 1
+        assert stmt.tags[0].value == "note"
+
+    def test_remember_multiple_tags(self, parse_ast):
+        # LLM.md's own documented example (§17 memory-aware agent pattern):
+        # `remember answer tagged "advice", "user_123"` — comma-separated,
+        # not just a single tag.
+        d = parse_ast(
+            'agent A { memory { } '
+            'step f(x: string) { remember x tagged "advice", "user_123" } }'
+        ).declarations[0]
+        stmt = d.steps[0].body[0]
+        assert isinstance(stmt, ast.RememberStmt)
+        assert [t.value for t in stmt.tags] == ["advice", "user_123"]
 
 
 class TestCodegen:
@@ -125,6 +183,19 @@ class TestMemoryStoreRuntime:
         assert "python tip" in out
         assert "python tip 2" in out
         assert "rust tip" not in out
+
+    def test_multiple_tags_are_each_individually_recallable(self):
+        # `remember <expr> tagged "advice", "user_123"` (LLM.md's own
+        # documented example) — a value tagged with multiple tags must be
+        # findable by recalling on ANY one of them, not just the first.
+        store = MemoryStore(store_url="sqlite://:memory:", recall_strategy="relevant")
+        store.remember("be concise", tag=["advice", "user_123"])
+        store.remember("unrelated", tag="other_user")
+        by_first_tag = store.recall(key="advice")
+        by_second_tag = store.recall(key="user_123")
+        assert "be concise" in by_first_tag
+        assert "be concise" in by_second_tag
+        assert "unrelated" not in by_first_tag
 
     def test_max_recall_limits_results(self):
         store = MemoryStore(store_url="sqlite://:memory:", max_recall=2)
@@ -198,3 +269,74 @@ class TestEndToEnd:
         recalled = agent.memory.recall(key="python")
         assert any("mutable" in r for r in recalled)
         assert any("ordered" in r for r in recalled)
+
+    @pytest.mark.asyncio
+    async def test_step_uses_remember_with_multiple_tags(self, transpile, tmp_path):
+        # LLM.md's documented multi-tag example
+        # (`remember answer tagged "advice", "user_123"`) end-to-end:
+        # source -> generated Python -> real execution -> recallable by
+        # either tag. This used to be a ParseError before RememberStmt
+        # gained multi-tag support.
+        src = (
+            'agent A { memory { } '
+            '  step note(body: string) -> string { '
+            '    remember body tagged "advice", "user_123" '
+            '    return body '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_multitag.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_multitag", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_multitag"] = mod
+        spec.loader.exec_module(mod)
+        agent = mod.A()
+        await agent.note(body="be concise")
+        assert any("concise" in r for r in agent.memory.recall(key="advice"))
+        assert any("concise" in r for r in agent.memory.recall(key="user_123"))
+
+    @pytest.mark.asyncio
+    async def test_recall_bare_variable_uses_runtime_value_not_literal_name(
+        self, transpile, tmp_path
+    ):
+        # End-to-end proof of the recall-description fix: `recall query
+        # for key` must search using query's actual runtime VALUE. Before
+        # the fix, this searched for the literal string "query" (the
+        # identifier's source-code name) every single time, regardless of
+        # what was actually passed in — LLM.md's own documented memory
+        # pattern was silently broken this way.
+        src = (
+            'agent A { memory { recall strategy: "relevant" } '
+            '  step ask(query: string) -> list<string> { '
+            '    return recall query for "notes" '
+            '  } '
+            '  step save(text: string) -> string { '
+            '    remember text tagged "notes" '
+            '    return text '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_recall_var.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_recall_var", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_recall_var"] = mod
+        spec.loader.exec_module(mod)
+        agent = mod.A()
+        await agent.save(text="python tip: lists are mutable")
+        await agent.save(text="rust tip: ownership rules")
+        # relevant strategy filters by substring match against `key`
+        # ("notes" — same for both), so both are recallable; the real
+        # assertion is that passing DIFFERENT `query` values doesn't
+        # crash and doesn't literally search for the word "query".
+        results = await agent.ask(query="anything")
+        assert any("python" in r for r in results)
+        assert any("rust" in r for r in results)
+        # The literal identifier name must never leak into the search.
+        no_literal_match = await agent.ask(query="query")
+        assert no_literal_match == results

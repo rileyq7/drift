@@ -573,9 +573,15 @@ class MemoryStore:
         )
         self._conn.commit()
 
-    def remember(self, value: Any, tag: str = ""):
-        """Persist a value with an optional tag for later recall."""
+    def remember(self, value: Any, tag: Any = ""):
+        """Persist a value with an optional tag (or list of tags — see
+        `remember <expr> tagged "a", "b"`) for later recall. Multiple tags
+        are comma-joined into the single stored tag column; recall/forget's
+        `LIKE '%key%'` substring match still finds any one of them, mirroring
+        DendricStore._tag_to_context's list handling for the real backend."""
         payload = self._serialize(value)
+        if isinstance(tag, (list, tuple)):
+            tag = ",".join(str(t) for t in tag)
         self._conn.execute(
             "INSERT INTO memories (tag, value, created_at) VALUES (?, ?, ?)",
             (str(tag), payload, time.time()),
@@ -808,7 +814,14 @@ def build_intent_prompt(verb: str, input_data: Any, **kwargs) -> str:
         parts.append(f"\nReturn exactly {kwargs['count']} {unit}.")
 
     if 'target' in kwargs and kwargs['target'] is not None:
-        parts.append(f"\nTARGET: {kwargs['target']}")
+        target = kwargs['target']
+        target_str = ", ".join(str(t) for t in target) if isinstance(target, list) else str(target)
+        parts.append(f"\nTARGET: {target_str}")
+
+    if 'with_' in kwargs and kwargs['with_'] is not None:
+        with_val = kwargs['with_']
+        with_str = ", ".join(str(w) for w in with_val) if isinstance(with_val, list) else str(with_val)
+        parts.append(f"\nWITH: {with_str}")
 
     if 'factors' in kwargs and kwargs['factors'] is not None:
         parts.append(f"\nCONSIDER THESE FACTORS: {', '.join(str(f) for f in kwargs['factors'])}")
