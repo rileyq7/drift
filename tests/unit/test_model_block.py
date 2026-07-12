@@ -161,6 +161,91 @@ class TestRouterUpgradeAtRuntime:
         assert r.select(context={"step": "x"}) == "claude-sonnet"
 
 
+class TestCurrentStepScopingAtRuntime:
+    """TestRouterUpgradeAtRuntime tests ModelRouter.select() in isolation
+    with a hand-built context dict — it never exercises what actually
+    populates context["step"] at runtime: step_decorator's _current_step
+    tracking. That's where the real bug was: _current_step is set
+    unconditionally on step entry but was never restored on exit, so a
+    step that calls another step internally left _current_step stuck on
+    the NESTED step's name even after that call returned — a `step is
+    outer` upgrade rule would silently stop matching for any intent call
+    the outer step makes after its nested call returns.
+    """
+
+    @pytest.mark.asyncio
+    async def test_upgrade_rule_matches_after_nested_step_call_returns(
+        self, transpile, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        src = (
+            'agent A { '
+            '  model { '
+            '    default: "claude-haiku" '
+            '    upgrade to "claude-sonnet" when { step is outer } '
+            '  } '
+            '  step outer() -> string { '
+            '    let inner_result = inner() '
+            '    let after = classify "y" as string '
+            '    return after '
+            '  } '
+            '  step inner() -> string { '
+            '    return "done" '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_current_step.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_current_step", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_current_step"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+        selected_steps = []
+        orig_select = agent.model.select
+        def spy_select(remaining, context=None):
+            selected_steps.append(context.get("step") if context else None)
+            return orig_select(remaining, context=context)
+        agent.model.select = spy_select
+
+        await agent.outer()
+        # The classify call happens AFTER inner() returns — it must see
+        # _current_step == "outer" (not stuck on "inner" from the nested
+        # call), so the upgrade rule actually fires.
+        assert selected_steps == ["outer"]
+
+    @pytest.mark.asyncio
+    async def test_current_step_restored_to_none_after_top_level_call(
+        self, transpile, tmp_path
+    ):
+        src = (
+            'agent A { model: "claude-haiku" '
+            '  step outer() -> string { '
+            '    let inner_result = inner() '
+            '    return inner_result '
+            '  } '
+            '  step inner() -> string { return "done" } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_current_step2.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_current_step2", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_current_step2"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+        assert getattr(agent, "_current_step", None) is None
+        await agent.outer()
+        # Restored to the pre-call state (None), not stuck on "inner".
+        assert getattr(agent, "_current_step", None) is None
+
+
 class TestColonFormStillWorks:
     """The block form is additive — the simple `model: "x"` syntax must still parse."""
 

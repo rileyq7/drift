@@ -1353,7 +1353,17 @@ def step_decorator(output=None, modifier=""):
             if hasattr(self, 'model') and self.model is not None:
                 self.model.reset_availability()
             # Remember the current step name so router upgrade rules
-            # (`step is final_recommendation`) can fire.
+            # (`step is final_recommendation`) can fire. Scoped per call
+            # frame, same reasoning as _drift_silent below: a step that
+            # calls another step internally (`let x = inner()`) used to
+            # leave _current_step stuck on the NESTED step's name even
+            # after that call returned and control resumed in the outer
+            # step's own body — a `step is outer` upgrade rule would
+            # silently stop matching for any intent call the outer step
+            # makes after its nested call returns, and `step is inner`
+            # would incorrectly still match. Restored in the finally block
+            # below alongside _drift_silent.
+            prev_current_step = getattr(self, '_current_step', None)
             self._current_step = step_name
 
             def _tag(exc):
@@ -1434,6 +1444,11 @@ def step_decorator(output=None, modifier=""):
                 # that let a nested non-silent step's own respond calls
                 # inherit the caller's silence and never turn it back off).
                 self._drift_silent = was_silent
+                # Same reasoning for _current_step — restore the caller's
+                # step name so a `step is X` upgrade rule keeps matching
+                # correctly for any code the caller runs after a nested
+                # step call returns.
+                self._current_step = prev_current_step
 
         return wrapper
     return decorator
