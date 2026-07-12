@@ -1348,9 +1348,18 @@ def step_decorator(output=None, modifier=""):
                 if cache_key in cache:
                     return cache[cache_key]
 
-            # Clear transient unavailability at the start of each step. A 503
-            # on a previous step shouldn't degrade this one.
-            if hasattr(self, 'model') and self.model is not None:
+            # Clear transient unavailability at the start of each TOP-LEVEL
+            # step call — a 503 on a previous step shouldn't degrade the
+            # next one. But this must not fire for a NESTED step call (one
+            # step invoking another internally): resetting there would wipe
+            # out an unavailability mark the OUTER step just recorded (e.g.
+            # after a ModelUnavailable retry) before it's done relying on
+            # it, silently letting the outer step retry the same broken
+            # model again once the nested call returns. Same scoping bug
+            # class as _drift_silent/_current_step below — only reset when
+            # this is the outermost call on the stack.
+            is_nested_call = getattr(self, '_current_step', None) is not None
+            if not is_nested_call and hasattr(self, 'model') and self.model is not None:
                 self.model.reset_availability()
             # Remember the current step name so router upgrade rules
             # (`step is final_recommendation`) can fire. Scoped per call

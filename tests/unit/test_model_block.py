@@ -245,6 +245,72 @@ class TestCurrentStepScopingAtRuntime:
         # Restored to the pre-call state (None), not stuck on "inner".
         assert getattr(agent, "_current_step", None) is None
 
+    @pytest.mark.asyncio
+    async def test_unavailability_mark_survives_a_nested_step_call(
+        self, transpile, tmp_path
+    ):
+        # Third instance of the same scoping bug class as _drift_silent and
+        # _current_step: step_decorator unconditionally called
+        # self.model.reset_availability() on every step entry, including
+        # NESTED ones. If the outer step marks a model unavailable (after a
+        # ModelUnavailable error) and then calls another step internally
+        # before its own retry/fallback logic is done relying on that mark,
+        # the nested step's entry silently wiped it — so the outer step's
+        # own subsequent model selection could pick the same broken model
+        # right back up once the nested call returned.
+        from drift.runtime import ModelUnavailable
+
+        src = (
+            'agent A { '
+            '  model { default: "claude-haiku" fallback: "gpt-4o" } '
+            '  step outer() -> string { '
+            '    let x = classify "first" as string '
+            '    let inner_result = inner() '
+            '    let after = classify "y" as string '
+            '    return after '
+            '  } '
+            '  step inner() -> string { '
+            '    return "done" '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_unavail_scope.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_unavail_scope", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_unavail_scope"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+        calls = {"n": 0}
+
+        async def flaky_intent(verb, input_data=None, output_schema=None, **kwargs):
+            calls["n"] += 1
+            if input_data == "first" and calls["n"] == 1:
+                raise ModelUnavailable("down", model="claude-haiku")
+            return f"ok:{input_data}"
+
+        agent.intent = flaky_intent
+
+        seen_inside_inner = {}
+        orig_inner = agent.inner
+
+        async def spy_inner(*a, **kw):
+            seen_inside_inner["unavailable"] = set(agent.model._unavailable)
+            return await orig_inner(*a, **kw)
+
+        agent.inner = spy_inner
+
+        await agent.outer()
+        # The mark made by outer's own fallback handling must still be
+        # visible from inside the nested inner() call...
+        assert seen_inside_inner["unavailable"] == {"claude-haiku"}
+        # ...and must still be in effect after inner() returns and outer
+        # resumes (not wiped by inner()'s own step entry).
+        assert agent.model._unavailable == {"claude-haiku"}
+
 
 class TestColonFormStillWorks:
     """The block form is additive — the simple `model: "x"` syntax must still parse."""
