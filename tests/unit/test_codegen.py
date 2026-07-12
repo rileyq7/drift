@@ -252,6 +252,57 @@ class TestControlFlowCodegen:
         assert "asyncio.gather" in out
 
 
+class TestBareCrossAgentCallStatement:
+    """Regression: LLM.md only documents `let result = OtherAgent.step(...)`
+    (§10), but a bare cross-agent call with no `let` binding — a
+    completely reasonable side-effect-only call, e.g. paging an on-call
+    notifier agent and discarding its return value — never parsed at all.
+    parse_statement's dispatch only checked `t.type == TT.IDENT`; a
+    statement starting with TT.TYPE_IDENT (any PascalCase agent name)
+    fell straight through to a bare "Expected statement" ParseError."""
+
+    def test_bare_cross_agent_call_parses(self, transpile):
+        src = (
+            'agent Notifier { model: "claude-haiku" '
+            '  step ping(msg: string) -> string { return msg } } '
+            'agent A { model: "claude-haiku" '
+            '  step f(msg: string) { Notifier.ping(msg) } }'
+        )
+        out = transpile(src)
+        assert "await Notifier().ping(msg)" in out
+
+    @pytest.mark.asyncio
+    async def test_bare_cross_agent_call_actually_executes(self, transpile, tmp_path, monkeypatch):
+        src = (
+            'agent Notifier { model: "claude-haiku" '
+            '  step ping(msg: string) -> string { return msg } } '
+            'agent A { model: "claude-haiku" '
+            '  step f(msg: string) -> string { Notifier.ping(msg) return "done" } }'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_bare_cross_agent.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_bare_cross_agent", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_bare_cross_agent"] = mod
+        spec.loader.exec_module(mod)
+
+        # Prove Notifier.ping actually ran (not just parsed/awaited-away as
+        # a no-op) by monkeypatching its method to record the call.
+        calls = []
+        orig_ping = mod.Notifier.ping
+        async def spy_ping(self, msg):
+            calls.append(msg)
+            return await orig_ping(self, msg)
+        monkeypatch.setattr(mod.Notifier, "ping", spy_ping)
+
+        agent = mod.A()
+        result = await agent.f(msg="hello")
+        assert result == "done"
+        assert calls == ["hello"]
+
+
 class TestRespond:
     def test_respond_with_interpolation(self, transpile):
         src = 'agent A { step s(name: string) { respond "Hi, {name}!" } }'

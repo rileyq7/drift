@@ -712,6 +712,19 @@ class CodeGenerator:
 
         # Collect step names for self-call detection
         self._agent_step_names = {s.name for s in agent.steps}
+        # Collect state field names — `let x = ...` and bare reads of `x`
+        # inside step bodies must resolve to `self.x` (the actual state
+        # attribute set in __init__) when x is a declared state field,
+        # not a fresh local variable. Without this, `state { count: int
+        # = 0 }` followed by `let count = count + 1` shadows the state
+        # attribute with a same-named local that starts undefined —
+        # Python's scoping rules make ANY name assigned anywhere in a
+        # function local to that function for its entire body — crashing
+        # with UnboundLocalError the moment the right-hand side reads it.
+        # This made `state` fields effectively read-only (settable only
+        # via their declared default) despite being documented as mutable
+        # per-run scratch data.
+        self._agent_state_names = {f.name for f in agent.state_block}
 
         # __init__
         self.emit_line("def __init__(self):")
@@ -965,7 +978,17 @@ class CodeGenerator:
 
     def gen_let(self, stmt: ast.LetStmt):
         expr = self.gen_expr(stmt.value)
-        self.emit_line(f"{stmt.name} = {expr}")
+        target = self._resolve_assignment_target(stmt.name)
+        self.emit_line(f"{target} = {expr}")
+
+    def _resolve_assignment_target(self, name: str) -> str:
+        """`let x = ...` targets `self.x` when x is a declared state
+        field (mutating persistent per-run state), or a fresh local
+        variable otherwise. See _agent_state_names' collection comment."""
+        state_names = getattr(self, '_agent_state_names', set())
+        if name in state_names:
+            return f"self.{name}"
+        return name
 
     def gen_return(self, stmt: ast.ReturnStmt):
         if stmt.value is None:
@@ -1273,6 +1296,15 @@ class CodeGenerator:
                 return f"not {self.gen_expr(expr.operand)}"
             return f"({op}{self.gen_expr(expr.operand)})"
         elif isinstance(expr, ast.Ident):
+            # A bare reference to a declared state field name must read
+            # self.<name> (the actual persisted attribute), not a plain
+            # local — see _agent_state_names' collection comment in
+            # gen_agent for why a bare local would be wrong (shadows the
+            # state attribute; UnboundLocalError on first read-before-
+            # local-write, silently-wrong "always starts at the default"
+            # semantics otherwise).
+            if expr.name in getattr(self, '_agent_state_names', set()):
+                return f"self.{expr.name}"
             return expr.name
         elif isinstance(expr, ast.StringLit):
             if expr.has_interpolation:
@@ -1304,6 +1336,38 @@ class CodeGenerator:
             return "None"
         else:
             return repr(expr)
+
+    def _rewrite_state_refs(self, expr_src: str) -> str:
+        """Rewrite bare references to declared state fields (`{count}` ->
+        `{self.count}`) inside a string-interpolation body.
+
+        _gen_fstring embeds interpolation bodies as raw source text, not
+        parsed Drift expressions — so a state field read this way (e.g.
+        `respond "{count} escalations"`) would otherwise reference an
+        undefined bare Python name instead of the actual self.count
+        attribute, the same class of bug gen_let/gen_expr's Ident case fix
+        for `let`/bare-expression reads of state fields.
+        """
+        state_names = getattr(self, '_agent_state_names', set())
+        if not state_names:
+            return expr_src
+        try:
+            tree = py_ast.parse(expr_src.strip(), mode='eval')
+        except SyntaxError:
+            return expr_src  # already reported by _validate_interp_expr
+        changed = False
+        for node in py_ast.walk(tree):
+            if isinstance(node, py_ast.Name) and node.id in state_names:
+                node.id = f"__drift_state_marker__{node.id}"
+                changed = True
+        if not changed:
+            return expr_src
+        rewritten = py_ast.unparse(tree)
+        for name in state_names:
+            rewritten = rewritten.replace(
+                f"__drift_state_marker__{name}", f"self.{name}"
+            )
+        return rewritten
 
     def _gen_fstring(self, value: str) -> str:
         """Emit a Python f-string from a Drift interpolated string.
@@ -1343,6 +1407,7 @@ class CodeGenerator:
                     j += 1
                 expr_src = value[i + 1:j]
                 _validate_interp_expr(expr_src)
+                expr_src = self._rewrite_state_refs(expr_src)
                 parts.append((False, expr_src))
                 i = j + 1
             elif ch == '}':

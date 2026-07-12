@@ -930,6 +930,22 @@ class Parser:
                 expr = self.parse_expression()
                 return ast.ExprStmt(expr=expr)
 
+        if t.type == TT.TYPE_IDENT:
+            # A bare cross-agent call as a standalone statement, e.g.
+            # `Notifier.alert_oncall(msg)` with no `let` binding — LLM.md
+            # only documents the `let result = OtherAgent.step(...)` form,
+            # but discarding a step's return value (side-effect-only calls,
+            # matching how a bare tool call or `recall` needs no binding
+            # either) is a completely reasonable thing to write and was
+            # simply never reachable: parse_statement's dispatch only
+            # checked `t.type == TT.IDENT`, so any statement starting with
+            # a PascalCase agent name fell straight through to "Expected
+            # statement". parse_expression/parse_primary already handle
+            # `TypeName.method(...)` correctly (used by the `let`-assigned
+            # form) — just route to it here too.
+            expr = self.parse_expression()
+            return ast.ExprStmt(expr=expr)
+
         raise ParseError("Expected statement", t)
 
     def parse_attempt(self):
@@ -1256,6 +1272,19 @@ class Parser:
                 self.eat()
                 if self.check_ident('other'):
                     self.eat()
+                arm.is_default = True
+                arm.pattern = ast.Ident(name='_')
+            elif self.check(TT.IDENT, '_'):
+                # `_ -> { ... }` — the catch-all documented in LLM.md's
+                # `match` statement syntax. Distinct from `any other`
+                # (deja_vu's catch-all keyword) — both are accepted here
+                # since `match`'s own doc example uses `_`, not `any`. A
+                # bare `_` used to fall through to parse_expression() as
+                # an ordinary Ident pattern (compared for equality against
+                # an undefined Python name `_` at runtime — NameError on
+                # every match that reached the catch-all arm) instead of
+                # being recognized as the wildcard.
+                self.eat()
                 arm.is_default = True
                 arm.pattern = ast.Ident(name='_')
             elif self.peek().type == TT.STRING:
