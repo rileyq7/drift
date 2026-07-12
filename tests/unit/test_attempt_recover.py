@@ -78,11 +78,18 @@ class TestAttemptCodegen:
         assert "try:" in out
         assert "except ModelUnavailable" in out
 
-    def test_default_becomes_drift_error_catch(self):
+    def test_default_becomes_broad_exception_catch(self):
+        # `any error` must mean "catches anything" — not just Drift's own
+        # exception hierarchy. A REST/MCP/python tool call inside an
+        # attempt block can raise httpx errors, MCP protocol errors, or
+        # whatever a python-kind tool's own code raises, none of which are
+        # DriftError subclasses; `any error -> ...` is exactly the arm a
+        # caller would expect to survive those.
         out = self._gen(
             'attempt { respond "x" } recover from { any error -> respond "f" }'
         )
-        assert "except DriftError" in out
+        assert "except Exception" in out
+        assert "except DriftError" not in out
 
     def test_retry_compiles_to_continue(self):
         out = self._gen(
@@ -108,7 +115,7 @@ class TestAttemptCodegen:
             '  ModelUnavailable -> respond "down" '
             '}'
         )
-        any_pos = out.find("except DriftError")
+        any_pos = out.find("except Exception")
         mu_pos = out.find("except ModelUnavailable")
         assert mu_pos != -1 and any_pos != -1
         assert mu_pos < any_pos, "specific arm must precede `any error`"
