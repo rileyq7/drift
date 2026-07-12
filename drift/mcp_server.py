@@ -23,6 +23,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -123,6 +124,35 @@ async def _run(source: str, input_json: str | None = None) -> dict:
         try:
             try:
                 spec.loader.exec_module(module)
+            except ModuleNotFoundError as e:
+                # Two distinct causes collapse into the same Python
+                # exception: (a) a cross-file `import { X } from
+                # "./other.drift"` — drift_run can't resolve it, since it
+                # only ever receives raw source text, not a file path, so
+                # there's no directory for a relative import to resolve
+                # against (unlike `drift run <file>` via the CLI, which
+                # auto-transpiles the dependency and fixes up the import
+                # path); or (b) a `tool ... from python "module:fn"`
+                # referencing a real missing/unimportable Python module,
+                # unrelated to Drift's own `import`. Only show the
+                # cross-file-import hint when the source actually
+                # contains a `.drift`-suffixed import — a cheap text
+                # check on the original source, not a full re-parse.
+                if re.search(r'import\s.*from\s+"[^"]*\.drift"', source):
+                    hint = (
+                        " — likely cause: drift_run can't resolve cross-file "
+                        "`import` (it receives raw source text, not a file "
+                        "path, so relative imports have nothing to resolve "
+                        "against). Inline the dependency into one source "
+                        "string, or write the files to disk and use `drift "
+                        "run <file>` instead."
+                    )
+                else:
+                    hint = ""
+                return {
+                    "ok": False, "stage": "import",
+                    "error": f"{type(e).__name__}: {e}{hint}",
+                }
             except Exception as e:
                 return {"ok": False, "stage": "import", "error": f"{type(e).__name__}: {e}"}
 

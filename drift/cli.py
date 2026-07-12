@@ -344,7 +344,8 @@ def _run_once(args):
         tokens = lex(source)
         parser = Parser(tokens)
         program = parser.parse()
-        dep_dirs = _transpile_drift_dependencies(program, Path(args.file), set())
+        seen_deps = set()  # mutated in-place by _transpile_drift_dependencies
+        dep_dirs = _transpile_drift_dependencies(program, Path(args.file), seen_deps)
         codegen = CodeGenerator()
         python_source = codegen.generate(program)
         python_source = python_source.replace(
@@ -357,8 +358,18 @@ def _run_once(args):
             f.write(python_source)
         print(f"  ✓ Transpiled → {py_path}")
 
-        # Force a re-import each watch iteration.
+        # Force a re-import each watch iteration. Dependency modules
+        # (from a cross-file `import`) need the same treatment as the
+        # main module: `from schema_dep import Shared` caches
+        # sys.modules['schema_dep'] process-wide the first time it's
+        # imported, so a later run — in --watch mode, or any other
+        # scenario where this process imports a DIFFERENT file that also
+        # happens to depend on a same-named sibling — would silently get
+        # the stale cached module instead of the current one, even though
+        # its .py was freshly re-transpiled above.
         sys.modules.pop('drift_generated', None)
+        for dep_path in seen_deps:
+            sys.modules.pop(dep_path.stem, None)
         spec = importlib.util.spec_from_file_location("drift_generated", py_path)
         module = importlib.util.module_from_spec(spec)
         sys.modules['drift_generated'] = module

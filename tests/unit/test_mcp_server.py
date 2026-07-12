@@ -71,6 +71,57 @@ class TestDriftRun:
         assert result["stage"] in ("lex", "parse")
 
     @pytest.mark.asyncio
+    async def test_cross_file_import_gets_actionable_hint(self, monkeypatch):
+        # drift_run takes raw source TEXT, not a file path — a cross-file
+        # `import { X } from "./other.drift"` has no directory to resolve
+        # against and always fails with a bare ModuleNotFoundError. Without
+        # a hint, a calling agent would have no way to know this is a
+        # structural limitation (source text vs. file path) rather than a
+        # bug in their program — `drift run <file>` via the CLI resolves
+        # this exact pattern correctly, so the error needs to say why this
+        # specific tool can't.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        # Use a distinctive module name — a real .drift dependency named
+        # exactly this is exceedingly unlikely to exist anywhere on
+        # sys.path, avoiding any risk of colliding with an unrelated
+        # test's own transpiled dependency of the same name still cached
+        # in sys.modules from earlier in the same pytest process (e.g.
+        # test_cli.py's cross-file-import tests, which legitimately leave
+        # their own dependency modules cached after passing — clearing
+        # sys.modules on every _run_once call is what THAT bug fix is
+        # about; this test exercises a different function, mcp_server's
+        # _run(), which never touches sys.modules at all).
+        src = (
+            'import { Shared } from "./mcp_server_test_nonexistent_dep_xyz.drift"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f(item: string) -> string { return item } }'
+        )
+        result = await _run(src)
+        assert result["ok"] is False
+        assert result["stage"] == "import"
+        assert "ModuleNotFoundError" in result["error"]
+        assert "drift_run can't resolve cross-file" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_unrelated_module_not_found_has_no_misleading_hint(self, monkeypatch):
+        # A `tool ... from python "module:fn"` referencing a genuinely
+        # missing Python module raises the same ModuleNotFoundError type
+        # as the cross-file-import case, but for an unrelated reason — the
+        # cross-file-import hint must not fire when the source has no
+        # `.drift`-suffixed import at all.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        src = (
+            'tool calc from python "nonexistent_module_xyz:some_fn"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f() -> string { let x = calc() return x } }'
+        )
+        result = await _run(src)
+        assert result["ok"] is False
+        assert result["stage"] == "import"
+        assert "ModuleNotFoundError" in result["error"]
+        assert "drift_run can't resolve cross-file" not in result["error"]
+
+    @pytest.mark.asyncio
     async def test_run_restores_module_slot(self, monkeypatch):
         import sys
         monkeypatch.setenv("DRIFT_USE_MOCK", "1")

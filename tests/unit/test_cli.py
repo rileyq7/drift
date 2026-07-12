@@ -157,3 +157,41 @@ class TestCrossFileImportResolution:
         rc = _run_once(_args(str(main_file), input='{"item": {"name": "widget"}}'))
         assert rc == 0
         assert (agents_dir / "checker.py").exists()
+
+    def test_stale_dependency_module_not_reused_across_runs(self, tmp_path, monkeypatch, capsys):
+        # Regression: `sys.modules.pop('drift_generated', None)` already
+        # force-clears the MAIN module before each run (for --watch mode),
+        # but the fix that made dependency imports work at all introduced
+        # the same staleness risk one level down — `from schema_dep import
+        # Shared` caches sys.modules['schema_dep'] process-wide the first
+        # time it's imported. Without also clearing that, a later
+        # _run_once call — in --watch mode watching a file whose
+        # dependency changed, or any long-lived process making repeated
+        # calls — would silently reuse the FIRST run's cached dependency
+        # module even after the dependency's .drift source (and freshly
+        # re-transpiled .py) changed.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        dep_file = tmp_path / "schema_dep.drift"
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(self.MAIN_SRC)
+
+        dep_file.write_text('schema Shared { name: string }\n')
+        rc1 = _run_once(_args(str(main_file), input='{"item": {"name": "first"}}'))
+        assert rc1 == 0
+        out1 = capsys.readouterr().out
+        assert "first" in out1
+
+        # Change the dependency's shape entirely (different field name) —
+        # a stale cached module would still have the OLD `name` field and
+        # either silently return the wrong thing or crash differently
+        # than a correct fresh import would.
+        dep_file.write_text('schema Shared { different_field: string }\n')
+        main_file.write_text(
+            'import { Shared } from "./schema_dep.drift"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f(item: Shared) -> string { return item.different_field } }'
+        )
+        rc2 = _run_once(_args(str(main_file), input='{"item": {"different_field": "second"}}'))
+        assert rc2 == 0
+        out2 = capsys.readouterr().out
+        assert "second" in out2
