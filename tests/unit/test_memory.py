@@ -1,4 +1,5 @@
 """Tests for §9 memory block + recall/remember statements."""
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import pytest
 
 from drift import ast_nodes as ast
 from drift.parser import ParseError
-from drift.runtime import MemoryStore
+from drift.runtime import Agent, Budget, MemoryStore, run_agent, step_decorator
 
 
 class TestMemoryConfigParse:
@@ -247,6 +248,35 @@ class TestMemoryStoreRuntime:
         s2 = MemoryStore(store_url=f"sqlite://{path}")
         assert "persistent" in s2.recall()
         s2.close()
+
+    @pytest.mark.asyncio
+    async def test_run_agent_closes_the_memory_store_connection(self, tmp_path):
+        # Regression: MemoryStore/DendricStore both hold a live sqlite
+        # connection opened in __init__ that nothing previously closed —
+        # harmless for sqlite://:memory: (dies with the process anyway),
+        # but the MCP server constructs a fresh Agent/MemoryStore on
+        # every drift_run call in one long-lived process, leaking one
+        # connection/file descriptor per call for the documented
+        # sqlite://path/to/file.db persistence mode.
+        path = tmp_path / "mem.db"
+        store = MemoryStore(store_url=f"sqlite://{path}")
+
+        class WithMemory(Agent):
+            def __init__(self):
+                super().__init__(
+                    name="WithMemory", budget=Budget(max_per_run=1.0),
+                    memory=store,
+                )
+
+            @step_decorator()
+            async def go(self):
+                return "done"
+
+        await run_agent(WithMemory)
+        # A closed sqlite3 connection raises ProgrammingError on any
+        # further use — the standard way to detect it was actually closed.
+        with pytest.raises(sqlite3.ProgrammingError):
+            store._conn.execute("SELECT 1")
 
     def test_semantic_falls_back_to_relevant(self, capsys):
         store = MemoryStore(store_url="sqlite://:memory:", recall_strategy="semantic")

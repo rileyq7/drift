@@ -1949,3 +1949,15 @@ async def run_agent(agent_class: type, step_name: str = None,
                 mem.consolidate()
             except Exception as e:
                 print(f"  ⚠  consolidate failed: {type(e).__name__}: {e}")
+        # MemoryStore/DendricStore both hold a live sqlite connection
+        # opened in __init__ that nothing previously closed — harmless
+        # for sqlite://:memory: (dies with the process/temp dir anyway),
+        # but LLM.md documents sqlite://path/to/file.db as the intended
+        # cross-run persistence mode, and the MCP server constructs a
+        # fresh Agent/MemoryStore on every drift_run call in one long-
+        # lived process, leaking one connection/file descriptor per call.
+        if mem is not None and hasattr(mem, "close"):
+            try:
+                mem.close()
+            except Exception as e:
+                print(f"  ⚠  memory close failed: {type(e).__name__}: {e}")
