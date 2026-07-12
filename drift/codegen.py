@@ -1587,14 +1587,58 @@ class CodeGenerator:
         """
         result = self.gen_expr(pipe.input_expr)
         for op in pipe.operations:
+            # Each stage hand-builds its call text instead of routing
+            # through gen_fn_call, so it used to silently skip the same
+            # await-detection gen_fn_call does for a bare async-stdlib call
+            # (fetch_url/wait/webhook), an internal step call, or an
+            # MCP/REST tool method — e.g. `url |> fetch_url` compiled to a
+            # bare `fetch_url(url)`, leaving an unawaited coroutine object
+            # as the "result" instead of the fetched content: no error, no
+            # warning, the real HTTP/MCP call never fires. Mirror
+            # gen_fn_call's own membership checks here instead.
             if isinstance(op, ast.FnCall):
                 args = ", ".join(self.gen_expr(a) for a in op.args)
-                if args:
-                    result = f"{op.name}({result}, {args})"
+                if op.target is not None:
+                    method = 'append' if op.name == 'add' else op.name
+                    target = self.gen_expr(op.target)
+                    call_str = f"{target}.{method}({result}, {args})" if args else f"{target}.{method}({result})"
+                    needs_await = (isinstance(op.target, ast.Ident)
+                                   and op.target.name in self.agent_names)
+                    if needs_await:
+                        # Cross-agent call target — same one-shot
+                        # instantiation shape gen_fn_call uses.
+                        call_str = f"await {target}().{method}({result}, {args})" if args else f"await {target}().{method}({result})"
+                    elif (isinstance(op.target, ast.Ident)
+                            and op.target.name in self.async_tool_names):
+                        call_str = f"await {call_str}"
+                elif op.name in getattr(self, '_agent_step_names', set()):
+                    # Internal step call — routes through self., like
+                    # gen_fn_call's step-name branch.
+                    call_str = f"await self.{op.name}({result}, {args})" if args else f"await self.{op.name}({result})"
                 else:
-                    result = f"{op.name}({result})"
+                    call_str = f"{op.name}({result}, {args})" if args else f"{op.name}({result})"
+                    if op.name in self.async_stdlib_imports:
+                        call_str = f"await {call_str}"
+                result = call_str
             elif isinstance(op, ast.Ident):
-                result = f"{op.name}({result})"
+                if op.name in getattr(self, '_agent_step_names', set()):
+                    call_str = f"await self.{op.name}({result})"
+                else:
+                    call_str = f"{op.name}({result})"
+                    if op.name in self.async_stdlib_imports:
+                        call_str = f"await {call_str}"
+                result = call_str
+            elif isinstance(op, ast.FieldAccess):
+                # Method-style stage with no explicit call parens in
+                # source, e.g. `city |> weather.get_forecast` — parses as
+                # a bare FieldAccess(target=Ident('weather'), field_name=
+                # 'get_forecast'), not an FnCall.
+                target_expr = self.gen_expr(op.target)
+                call_str = f"{target_expr}.{op.field_name}({result})"
+                if (isinstance(op.target, ast.Ident)
+                        and op.target.name in self.async_tool_names):
+                    call_str = f"await {call_str}"
+                result = call_str
             else:
                 result = f"{self.gen_expr(op)}({result})"
         return result
