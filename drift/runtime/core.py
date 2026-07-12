@@ -1716,6 +1716,43 @@ def _coerce_inputs(method, inputs: dict) -> dict:
     return {k: _coerce_to_hint(v, hints.get(k)) for k, v in inputs.items()}
 
 
+async def gather_or_cancel(*coros):
+    """asyncio.gather, but cancel + await any still-pending siblings
+    before propagating the first failure.
+
+    Generated code for `for each ... parallel` and a pipeline's `=>`
+    fan-out both used to call bare `asyncio.gather(*coros)` (no
+    `return_exceptions=True`). gather() raises as soon as the FIRST task
+    fails, but does not cancel the others — they keep running on the
+    event loop in the background. Each one holds a live budget
+    reservation (via CostTracker.reserve, see Agent.intent) from before
+    its own await — until each orphaned task naturally finishes (success
+    -> settle, failure -> release) or the process exits without ever
+    awaiting it again, CostTracker.reserved stays inflated, silently
+    understating remaining budget for cost-aware model routing and any
+    subsequent reserve() check, for however long those stragglers take
+    (or permanently, if they never get scheduled again). This wrapper
+    preserves the documented "one failed item loses the whole batch"
+    behavior (LLM.md's parallel-triage note) exactly — it still raises
+    the first failure — it just ensures the OTHER in-flight items are
+    cancelled and cleaned up immediately instead of leaking in the
+    background.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        # Await cancellation so each task's own except/finally (which
+        # releases its CostTracker reservation) actually runs before this
+        # function returns, rather than leaving that cleanup to happen
+        # whenever the event loop next gets around to it.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 def coerce_arg(fn, value: Any) -> Any:
     """Coerce `value` against the type hint of `fn`'s first real parameter
     (excluding `self`). Generated pipeline code calls this before invoking a

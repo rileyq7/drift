@@ -92,7 +92,9 @@ class TestPipelineCodegen:
             "  step g(x: string) -> string { return x } } "
             "pipeline P { use A A.f => A.g }"
         )
-        assert "asyncio.gather" in out
+        # gather_or_cancel wraps asyncio.gather with cancel-on-failure
+        # cleanup for still-in-flight siblings (drift/runtime/core.py).
+        assert "gather_or_cancel" in out
 
     def test_failure_handler_emits_try_except(self, transpile):
         out = transpile(

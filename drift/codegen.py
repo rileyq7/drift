@@ -224,7 +224,7 @@ class CodeGenerator:
             '    Agent, step_decorator, Budget, ModelRouter, Intent,',
             '    CostTracker, Checkpoint, Confident, MemoryStore, run_agent,',
             '    make_memory_store, StreamThenRouter,',
-            '    register_custom_verb, coerce_arg,',
+            '    register_custom_verb, coerce_arg, gather_or_cancel,',
             '    DriftError, StepFailed, SchemaViolation, BudgetExceeded,',
             '    ModelUnavailable, RateLimited, AuthError,',
             ')',
@@ -262,7 +262,7 @@ class CodeGenerator:
         - Topological execution: walk edges in declaration order, threading
           the previous result forward.
         - `->`  sequential: next(prev_result)
-        - `=>`  parallel fan-out: asyncio.gather over each item in prev_result
+        - `=>`  parallel fan-out: gather_or_cancel over each item in prev_result
         - `~>`  conditional: not implemented — raises CodegenError
         - `|>`  stream: not implemented — raises CodegenError
         - `on failure in <step>: skip ...` → try/except around that node, swallow
@@ -466,7 +466,7 @@ class CodeGenerator:
             # reasoning as _call_node's entry-point coercion.
             self.emit_line(f"# parallel fan-out into {edge.to_node}")
             self.emit_line(
-                f"_prev = await asyncio.gather(*[{callable_expr}(coerce_arg({callable_expr}, item)) "
+                f"_prev = await gather_or_cancel(*[{callable_expr}(coerce_arg({callable_expr}, item)) "
                 f"for item in _prev])"
             )
             self.emit_line(f"results[{edge.to_node!r}] = _prev")
@@ -1163,7 +1163,7 @@ class CodeGenerator:
                 for s in stmt.body:
                     self.gen_statement(s)
                 self.dedent()
-                self.emit_line(f"await asyncio.gather(*[_task(item) for item in {iterable}])")
+                self.emit_line(f"await gather_or_cancel(*[_task(item) for item in {iterable}])")
             else:
                 self.emit_line(f"for {stmt.var_name} in {iterable}:")
                 self.indent()

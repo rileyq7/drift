@@ -46,7 +46,11 @@ class TestParallelParse:
 
 
 class TestParallelCodegen:
-    def test_emits_asyncio_gather(self, transpile):
+    def test_emits_gather_or_cancel(self, transpile):
+        # gather_or_cancel (drift/runtime/core.py) wraps asyncio.gather
+        # with cancel-on-failure cleanup for still-in-flight siblings —
+        # see TestOrphanedTaskCleanup in test_runtime.py for why bare
+        # asyncio.gather leaked budget reservations on partial failure.
         py = transpile(
             'agent A { '
             'step f(xs: list<string>) -> string { '
@@ -54,7 +58,7 @@ class TestParallelCodegen:
             '  return "done" '
             '} }'
         )
-        assert "asyncio.gather" in py
+        assert "gather_or_cancel" in py
         assert "async def _task(x):" in py
 
     def test_checkpoint_uses_step_name_not_task(self, transpile):
@@ -166,15 +170,17 @@ class TestParallelRuntime:
     ):
         # Documents real, current behavior (LLM.md's "Parallel triage"
         # pattern, as written with no attempt/recover): `parallel`
-        # compiles to a plain asyncio.gather with no return_exceptions —
-        # one item's intent call ultimately failing propagates out of the
-        # WHOLE for-each, discarding every already-collected result along
-        # with it, not just the failed item's slot. This isn't a bug to
-        # fix (gather's default semantics are standard and arguably
-        # correct to fail loud by default) but is exactly the kind of
-        # silent-until-it-bites-you gap the language docs need to call
-        # out explicitly, since "parallel batch processing" reads as if
-        # it should be resilient by default.
+        # compiles to gather_or_cancel (asyncio.gather, no
+        # return_exceptions, plus cleanup of any still-in-flight siblings
+        # on failure — see drift/runtime/core.py) — one item's intent
+        # call ultimately failing propagates out of the WHOLE for-each,
+        # discarding every already-collected result along with it, not
+        # just the failed item's slot. This isn't a bug to fix (gather's
+        # default fail-loud semantics are standard and arguably correct)
+        # but is exactly the kind of silent-until-it-bites-you gap the
+        # language docs need to call out explicitly, since "parallel
+        # batch processing" reads as if it should be resilient by
+        # default.
         py = transpile(
             'agent A { '
             '  model: "claude-haiku" '

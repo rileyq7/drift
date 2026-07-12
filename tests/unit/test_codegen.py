@@ -240,7 +240,9 @@ class TestControlFlowCodegen:
         )
         out = transpile(src)
         assert "for x in xs:" in out
-        assert "asyncio.gather" not in out
+        # gather_or_cancel is always imported (part of the fixed runtime
+        # import list), so check it's not actually CALLED.
+        assert "gather_or_cancel(" not in out
 
     def test_for_each_parallel_uses_gather(self, transpile):
         src = (
@@ -249,7 +251,9 @@ class TestControlFlowCodegen:
             '} }'
         )
         out = transpile(src)
-        assert "asyncio.gather" in out
+        # gather_or_cancel wraps asyncio.gather with cancel-on-failure
+        # cleanup for still-in-flight siblings (drift/runtime/core.py).
+        assert "gather_or_cancel(" in out
 
 
 class TestBareCrossAgentCallStatement:

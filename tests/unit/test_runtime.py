@@ -8,6 +8,7 @@ from drift.runtime import (
     Agent, Budget, CostTracker, ModelRouter,
     BudgetExceeded, ModelUnavailable, RateLimited, AuthError,
     SchemaViolation, StepFailed, step_decorator, run_agent, first_declared,
+    gather_or_cancel,
 )
 from drift.runtime.core import parse_llm_response, MockProvider
 
@@ -785,3 +786,114 @@ class TestRunAgentCostOut:
 
         assert cost["total_cost"] == 0.02
         assert exc_info.value._drift_cost["total_cost"] == 0.02
+
+
+# ─── gather_or_cancel — orphaned-task cleanup on partial failure ──────
+
+class TestGatherOrCancel:
+    """Regression: `for each ... parallel` and a pipeline's `=>` fan-out
+    both compiled to a bare `asyncio.gather(*coros)` (no
+    return_exceptions=True). gather() raises as soon as the FIRST task
+    fails but does NOT cancel the others — they keep running in the
+    background. Each holds a live CostTracker reservation (from
+    Agent.intent's reserve-before-await) until it naturally finishes;
+    until then, cost_tracker.reserved stays inflated, understating
+    remaining budget for cost-aware routing and any subsequent reserve()
+    check — for however long the stragglers take, or permanently if
+    nothing ever awaits them again. gather_or_cancel preserves the exact
+    same "first failure propagates, whole batch lost" semantics but
+    cancels and awaits the still-pending siblings first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_preserves_first_failure_semantics(self):
+        # Same observable outcome as bare asyncio.gather: the first
+        # failure propagates, full stop.
+        async def fails():
+            raise ValueError("boom")
+
+        async def succeeds():
+            return "ok"
+
+        with pytest.raises(ValueError):
+            await gather_or_cancel(fails(), succeeds())
+
+    @pytest.mark.asyncio
+    async def test_still_pending_siblings_are_cancelled_and_cleaned_up(self):
+        # A slow sibling's cleanup (its own try/finally) must have
+        # actually run by the time gather_or_cancel raises — not still be
+        # pending in the background.
+        cleanup_ran = {"n": False}
+
+        async def fails_fast():
+            await asyncio.sleep(0.01)
+            raise ValueError("boom")
+
+        async def slow_but_cancellable():
+            try:
+                await asyncio.sleep(10)
+                return "should never get here"
+            finally:
+                cleanup_ran["n"] = True
+
+        with pytest.raises(ValueError):
+            await gather_or_cancel(fails_fast(), slow_but_cancellable())
+
+        # If the sibling were left running in the background (the old
+        # bare-gather behavior), this would still be False immediately
+        # after gather_or_cancel raises.
+        assert cleanup_ran["n"] is True
+
+    @pytest.mark.asyncio
+    async def test_budget_reservation_released_promptly_on_partial_failure(
+        self, transpile, tmp_path
+    ):
+        # End-to-end proof through real generated `for each ... parallel`
+        # code: one item fails after a real intent() reservation is made;
+        # a sibling item is still mid-flight (slow) when that happens.
+        # cost_tracker.reserved must be back at 0 immediately after the
+        # exception propagates out of the step — not stuck holding the
+        # slow sibling's reservation.
+        src = (
+            'agent A { model: "claude-haiku" '
+            '  step process(xs: list<string>) -> list<string> { '
+            '    let results = [] '
+            '    for each x in xs parallel { '
+            '      let r = classify x as string '
+            '      results.add(r) '
+            '    } '
+            '    return results '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_orphan_cleanup.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_orphan_cleanup", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_orphan_cleanup"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+
+        class SlowThenFailProvider:
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                if "bad" in prompt:
+                    await asyncio.sleep(0.01)
+                    raise ValueError("simulated LLM failure")
+                # The "good" item is slower than the failing one, so it's
+                # still in flight (and still holding its reservation)
+                # when "bad" raises.
+                await asyncio.sleep(0.2)
+                return ('"ok"', 10, 5)
+
+        agent._provider_for = lambda model_name: SlowThenFailProvider()
+
+        with pytest.raises(ValueError):
+            await agent.process(["good", "bad"])
+
+        # The reservation from the still-in-flight "good" call must have
+        # been released by gather_or_cancel's cleanup, not left stuck.
+        assert agent.cost_tracker.reserved == pytest.approx(0.0)

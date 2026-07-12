@@ -12,7 +12,7 @@ from drift.runtime import (
     Agent, step_decorator, Budget, ModelRouter, Intent,
     CostTracker, Checkpoint, Confident, MemoryStore, run_agent,
     make_memory_store, StreamThenRouter,
-    register_custom_verb, coerce_arg,
+    register_custom_verb, coerce_arg, gather_or_cancel,
     DriftError, StepFailed, SchemaViolation, BudgetExceeded,
     ModelUnavailable, RateLimited, AuthError,
 )
@@ -70,7 +70,7 @@ class InboxTriage(Agent):
         async def _task(email):
             analysis = await self.intent(verb="classify", input_data=email, output_schema=EmailAnalysis)
             analyses.append(analysis)
-        await asyncio.gather(*[_task(item) for item in emails])
+        await gather_or_cancel(*[_task(item) for item in emails])
         for a in analyses:
             if (a.priority == "urgent"):
                 self.output(f"URGENT — {a.subject}: {a.summary}")
