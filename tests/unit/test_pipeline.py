@@ -152,6 +152,92 @@ class TestPipelineCodegen:
         assert "except BudgetExceeded as _e:" in out
 
 
+class TestPipelineNodeResolution:
+    """A bare (undotted) pipeline node — `process`, not `Agent.process` —
+    used to resolve via `use_agents[0]`, i.e. whichever agent happened to
+    be LISTED FIRST in the `use` clause, regardless of which agent
+    actually declares that step. That silently broke as soon as `use`
+    order didn't match declaration order, and — worse — if two `use`d
+    agents both declared a same-named step, the second agent's step was
+    permanently, silently unreachable with no error at all. Fixed by
+    resolving bare nodes against the actual declaring agent (first
+    DECLARED, not first `use`d, on a tie), and raising CodegenError for
+    genuine ambiguity/missing-`use` cases instead of guessing."""
+
+    def test_bare_node_resolves_to_declaring_agent_not_use_order(self, transpile):
+        # `process` is declared on A but `use` lists B first — must still
+        # resolve to A, the agent that actually owns the step.
+        out = transpile(
+            "agent A { step process(x: string) -> string { return \"A\" } } "
+            "agent B { step other(x: string) -> string { return \"B\" } } "
+            "pipeline P { use B use A process -> B.other }"
+        )
+        assert "self.A.process" in out
+
+    def test_same_named_step_on_two_used_agents_resolves_to_first_declared(
+        self, transpile
+    ):
+        out = transpile(
+            "agent A { step process(x: string) -> string { return \"A\" } } "
+            "agent B { step process(x: string) -> string { return \"B\" } } "
+            "agent C { step other(x: string) -> string { return x } } "
+            "pipeline P { use A use B use C C.other -> process }"
+        )
+        assert "self.A.process" in out
+
+    def test_dotted_node_referencing_a_not_used_agent_is_rejected(self, transpile):
+        # This is LLM.md §12's own flagship example shape: agents named in
+        # pipeline edges but never `use`d. Used to pass drift check/transpile
+        # cleanly and only fail at `drift run` with an AttributeError.
+        with pytest.raises(CodegenError, match="use Classifier"):
+            transpile(
+                "agent Intake { step input_email(x: string) -> string { return x } } "
+                "agent Classifier { step tag(x: string) -> string { return \"s\" } } "
+                "pipeline Triage { input_email -> Classifier.tag }"
+            )
+
+    def test_bare_node_owned_by_no_used_agent_is_rejected(self, transpile):
+        with pytest.raises(CodegenError, match="none of its"):
+            transpile(
+                "agent A { step process(x: string) -> string { return x } } "
+                "pipeline P { use A nonexistent -> A.process }"
+            )
+
+    def test_ambiguous_failure_handler_across_same_named_steps_is_rejected(
+        self, transpile
+    ):
+        # _read_handler_phrase reads to the next NEWLINE (a plain natural-
+        # language phrase, unterminated by any keyword) — the edge must be
+        # on its own line or it gets swallowed into the handler text.
+        src = (
+            "agent A { step process(x: string) -> string { return \"A\" } } "
+            "agent B { step process(x: string) -> string { return \"B\" } } "
+            "agent C { step other(x: string) -> string { return x } } "
+            "pipeline P {\n"
+            "  use A use B use C\n"
+            "  on failure in process: skip and continue\n"
+            "  C.other -> process\n"
+            "}"
+        )
+        with pytest.raises(CodegenError, match="ambiguous"):
+            transpile(src)
+
+    def test_unambiguous_failure_handler_still_works(self, transpile):
+        # Sanity check: the new ambiguity check must not false-positive
+        # when only one used agent owns the named step.
+        src = (
+            "agent A { step entry(x: string) -> string { return x } "
+            "  step process(x: string) -> string { return x } } "
+            "pipeline P {\n"
+            "  use A\n"
+            "  A.entry -> process\n"
+            "  on failure in process: skip and continue\n"
+            "}"
+        )
+        out = transpile(src)
+        assert "try:" in out
+
+
 class TestPipelineEndToEnd:
     @pytest.mark.asyncio
     async def test_simple_chain_runs(self, transpile, tmp_path):
@@ -175,6 +261,36 @@ class TestPipelineEndToEnd:
         result = await pipe.run()
         # Producer returns "hello" → Consumer.take echoes it back
         assert result == "hello"
+
+    @pytest.mark.asyncio
+    async def test_inline_entry_step_return_does_not_crash(self, transpile, tmp_path):
+        # Regression: LLM.md's own documented workaround for "no syntax to
+        # start a pipeline with raw data" is to declare a real inline step
+        # as the entry node (`step tickets(batch: T) -> T { return batch }`).
+        # gen_return unconditionally emitted `self.checkpoint.save(...)`,
+        # but inline pipeline steps are plain methods on the pipeline class
+        # (gen_inline_step) — not Agent subclasses — so they have no
+        # `self.checkpoint`, crashing with AttributeError on the exact
+        # pattern the docs tell users to write.
+        src = (
+            "agent Triager { step classify(x: string) -> string { return \"urgent\" } } "
+            "pipeline P { "
+            "  use Triager "
+            "  step tickets(batch: list<string>) -> list<string> { return batch } "
+            "  tickets -> Triager.classify "
+            "}"
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_inline_entry.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_inline_entry", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_inline_entry"] = mod
+        spec.loader.exec_module(mod)
+        pipe = mod.P()
+        result = await pipe.run(["a", "b"])
+        assert result == "urgent"
 
     @pytest.mark.asyncio
     async def test_parallel_fanout_runs_per_item(self, transpile, tmp_path):

@@ -95,6 +95,12 @@ class CodeGenerator:
         self.agent_names: set[str] = set()
         self.async_tool_names: set[str] = set()
         self.async_stdlib_imports: set[str] = set()
+        # Declaration order (first-declared first) and a step-name ->
+        # declaring-agent-names map, both needed to resolve a bare
+        # pipeline node (`tickets`, no `Agent.` prefix) to the actual
+        # agent that owns that step — see _pipeline_node_callable.
+        self._agent_decl_order: list[str] = []
+        self._step_owners: dict[str, list[str]] = {}
 
     def generate(self, program: ast.Program) -> str:
         """Generate complete Python source from a Drift program."""
@@ -119,6 +125,9 @@ class CodeGenerator:
                 self.schemas_declared.append(decl.name)
             elif isinstance(decl, ast.AgentDecl):
                 self.agent_names.add(decl.name)
+                self._agent_decl_order.append(decl.name)
+                for step in decl.steps:
+                    self._step_owners.setdefault(step.name, []).append(decl.name)
             elif isinstance(decl, ast.ToolDecl) and decl.kind in ("mcp", "rest"):
                 self.async_tool_names.add(decl.name)
             elif (isinstance(decl, ast.ImportDecl)
@@ -388,16 +397,39 @@ class CodeGenerator:
             ret = f" -> {self.gen_type(step.return_type)}"
         self.emit_line(f"async def {step.name}({', '.join(params)}){ret}:")
         self.indent()
-        if not step.body:
-            self.emit_line("pass")
-        for s in step.body:
-            self.gen_statement(s)
+        prev_in_inline_step = getattr(self, "_in_inline_step", False)
+        self._in_inline_step = True
+        try:
+            if not step.body:
+                self.emit_line("pass")
+            for s in step.body:
+                self.gen_statement(s)
+        finally:
+            self._in_inline_step = prev_in_inline_step
         self.dedent()
 
     def _emit_pipeline_edge(self, edge: ast.PipelineEdge, pipe: ast.PipelineDecl, i: int):
         """Emit code that runs `to_node` with `_prev` as input."""
         callable_expr = self._pipeline_node_callable(edge.to_node, pipe)
         target_step_name = edge.to_node.split(".")[-1]
+        # `on failure in <step>` only ever names a bare step (the parser
+        # doesn't accept `Agent.step` there — see _parse_pipeline_handler),
+        # so if more than one `use`d agent declares a same-named step, a
+        # handler for that name is ambiguous: it would silently attach to
+        # whichever edge happens to resolve first, not necessarily the one
+        # the author meant. Refuse rather than guess.
+        if "." not in edge.to_node and target_step_name in pipe.failure_handlers:
+            step_owners = self._step_owners.get(target_step_name, ())
+            owning_agents = [a for a in pipe.use_agents if a in step_owners]
+            if len(owning_agents) > 1:
+                raise CodegenError(
+                    f"pipeline {pipe.name!r} has `on failure in "
+                    f"{target_step_name}`, but more than one `use`d agent "
+                    f"({', '.join(owning_agents)}) declares a step named "
+                    f"{target_step_name!r} — it's ambiguous which one the "
+                    f"handler is for. Reference the edge as `Agent.{target_step_name}` "
+                    "to disambiguate, or rename one of the steps."
+                )
         handler = pipe.failure_handlers.get(target_step_name, "")
         skip_on_failure = handler.startswith("skip")
         if handler and not skip_on_failure:
@@ -449,22 +481,54 @@ class CodeGenerator:
     def _pipeline_node_callable(self, node: str, pipe: ast.PipelineDecl) -> str:
         """Resolve a node name to an awaitable callable.
 
-        `Agent.step`     -> self.Agent.step
-        `step` (no dot)  -> self.<UsedAgent>.step if exactly one used agent
-                            owns it, else `self.step` (inline step)
+        `Agent.step`     -> self.Agent.step (Agent must be `use`d)
+        `step` (no dot)  -> self.<OwningAgent>.step, where <OwningAgent> is
+                            whichever `use`d agent actually declares a step
+                            with this name — per LLM.md §12, "current
+                            file's first agent" among candidates when more
+                            than one `use`d agent happens to declare a
+                            same-named step. Falls back to an inline step
+                            (self.<node>) if no agent owns it.
         """
         if "." in node:
             agent, step = node.split(".", 1)
+            if agent not in pipe.use_agents:
+                raise CodegenError(
+                    f"pipeline {pipe.name!r} references {node!r}, but "
+                    f"{agent!r} is not in this pipeline's `use` list — the "
+                    f"pipeline class only instantiates `use`d agents, so "
+                    f"this would be an AttributeError at runtime. Add "
+                    f"`use {agent}` to the pipeline body."
+                )
             return f"self.{agent}.{step}"
-        # Look up inline step
+        # Look up inline step first — an inline step's name always wins
+        # over a same-named agent step, since it's declared directly in
+        # this pipeline with no ambiguity.
         inline_names = {s.name for s in pipe.inline_steps}
         if node in inline_names:
             return f"self.{node}"
-        # If exactly one used agent has this step, qualify it implicitly.
-        # Without import resolution we can't know which agent owns the step;
-        # default to the first used agent if any, else self.<node>.
+        # Resolve to whichever `use`d agent actually declares this step,
+        # preferring declaration order (first-declared agent wins) when
+        # more than one `use`d agent has a same-named step — mirrors
+        # LLM.md's documented "current file's first agent" semantics
+        # instead of silently keying off `use` list position (which used
+        # to make `use B use A` wrongly resolve every bare node onto B,
+        # and silently drop A's same-named step with no error at all).
+        node_owners = self._step_owners.get(node, ())
+        owners = [a for a in self._agent_decl_order
+                  if a in pipe.use_agents and a in node_owners]
+        if owners:
+            return f"self.{owners[0]}.{node}"
         if pipe.use_agents:
-            return f"self.{pipe.use_agents[0]}.{node}"
+            candidates = ", ".join(repr(a) for a in pipe.use_agents)
+            raise CodegenError(
+                f"pipeline {pipe.name!r} references step {node!r}, but none "
+                f"of its `use`d agents ({candidates}) declare a step named "
+                f"{node!r}, and it isn't an inline pipeline step either. "
+                f"Declare `step {node}(...) {{ ... }}` inline in the "
+                f"pipeline, or reference it as `Agent.{node}` if you meant "
+                f"a specific agent."
+            )
         return f"self.{node}"
 
     def gen_tool_decl(self, tool: ast.ToolDecl):
@@ -995,10 +1059,16 @@ class CodeGenerator:
             self.emit_line("return")
         else:
             expr = self.gen_expr(stmt.value)
-            # Checkpoint before return
-            self.emit_line(f"_result = {expr}")
-            self.emit_line(f"self.checkpoint.save('{self._current_step_name()}', _result)")
-            self.emit_line("return _result")
+            if getattr(self, "_in_inline_step", False):
+                # Inline pipeline steps are plain methods on the pipeline
+                # class (see gen_inline_step) — not Agent subclasses, so
+                # they have no self.checkpoint to save to.
+                self.emit_line(f"return {expr}")
+            else:
+                # Checkpoint before return
+                self.emit_line(f"_result = {expr}")
+                self.emit_line(f"self.checkpoint.save('{self._current_step_name()}', _result)")
+                self.emit_line("return _result")
 
     def _current_step_name(self):
         # Prefer the explicit step-name stack set by gen_step — robust
