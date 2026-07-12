@@ -14,6 +14,7 @@ import os
 import json
 import time
 import asyncio
+import contextvars
 import dataclasses
 import inspect
 import typing
@@ -1309,6 +1310,33 @@ def _cache_key(args, kwargs) -> str:
         return repr((args, kwargs))
 
 
+# _current_step and _drift_silent used to live as bare self.<attr>
+# instance attributes, saved/restored per call via a plain local variable
+# in step_decorator's try/finally. That save/restore is correct for
+# SEQUENTIAL nesting (one step calling another internally) — the bug
+# class fixed elsewhere in this file — but it is NOT concurrency-safe: a
+# bare instance attribute is shared state across every task running
+# concurrently on the same agent instance (e.g. `for each ... parallel`,
+# or a pipeline's `=>` fan-out, both of which run N step calls via
+# asyncio.gather). Two step calls in flight at once each mutate the SAME
+# attribute; a step with no `step is X` rule of its own could transiently
+# observe a DIFFERENT concurrently-running task's step name during the
+# window between that task's set and its restore, if this task resumes
+# (after its own await) inside that window — non-deterministic, worse
+# under real network latency (exactly the conditions `parallel` exists
+# for). ContextVar gives each asyncio Task its own isolated copy,
+# automatically inherited at task-creation time — no shared mutable state
+# between concurrent siblings, and .set()/.reset() still behaves like a
+# stack for sequential nesting within one task, so the existing
+# sequential-nesting fix (and its tests) keeps working unchanged.
+_current_step_var: contextvars.ContextVar = contextvars.ContextVar(
+    '_drift_current_step', default=None
+)
+_drift_silent_var: contextvars.ContextVar = contextvars.ContextVar(
+    '_drift_silent', default=False
+)
+
+
 def step_decorator(output=None, modifier=""):
     """Decorator that wraps agent steps with cost tracking, checkpointing, and retries.
 
@@ -1356,23 +1384,19 @@ def step_decorator(output=None, modifier=""):
             # it, silently letting the outer step retry the same broken
             # model again once the nested call returns. Same scoping bug
             # class as _drift_silent/_current_step below — only reset when
-            # this is the outermost call on the stack.
-            is_nested_call = getattr(self, '_current_step', None) is not None
+            # this is the outermost call on the stack (or task — see
+            # _current_step_var's module-level docstring).
+            is_nested_call = _current_step_var.get() is not None
             if not is_nested_call and hasattr(self, 'model') and self.model is not None:
                 self.model.reset_availability()
             # Remember the current step name so router upgrade rules
-            # (`step is final_recommendation`) can fire. Scoped per call
-            # frame, same reasoning as _drift_silent below: a step that
-            # calls another step internally (`let x = inner()`) used to
-            # leave _current_step stuck on the NESTED step's name even
-            # after that call returned and control resumed in the outer
-            # step's own body — a `step is outer` upgrade rule would
-            # silently stop matching for any intent call the outer step
-            # makes after its nested call returns, and `step is inner`
-            # would incorrectly still match. Restored in the finally block
-            # below alongside _drift_silent.
-            prev_current_step = getattr(self, '_current_step', None)
-            self._current_step = step_name
+            # (`step is final_recommendation`) can fire. ContextVar gives
+            # each concurrent asyncio Task its own isolated copy (see
+            # _current_step_var's module-level docstring) — .set() here
+            # still behaves like a per-task stack for sequential nesting
+            # (a step calling another step internally), restored via the
+            # returned token in the finally block below.
+            current_step_token = _current_step_var.set(step_name)
 
             def _tag(exc):
                 setattr(exc, '_drift_agent', getattr(self, 'name', None))
@@ -1383,14 +1407,12 @@ def step_decorator(output=None, modifier=""):
             # duration of its execution — not just conditionally turning
             # silence on and leaving any inherited state untouched
             # otherwise. Without this, a `silent` step calling a
-            # non-silent step internally left `_drift_silent` (a single
-            # flag on the agent instance, not scoped per call frame) set
-            # to True the whole time, so the inner step's own `respond`
-            # calls were silently suppressed too — directly contradicting
-            # the documented behavior ("nested non-silent steps called
-            # from within it are unaffected once they return").
-            was_silent = getattr(self, '_drift_silent', False)
-            self._drift_silent = (modifier == "silent")
+            # non-silent step internally left silence on for the whole
+            # time, so the inner step's own `respond` calls were silently
+            # suppressed too — directly contradicting the documented
+            # behavior ("nested non-silent steps called from within it are
+            # unaffected once they return").
+            silent_token = _drift_silent_var.set(modifier == "silent")
 
             try:
                 # The step body itself is called ONCE — intent() already
@@ -1454,12 +1476,12 @@ def step_decorator(output=None, modifier=""):
                 # ran for modifier == "silent", which is exactly the gap
                 # that let a nested non-silent step's own respond calls
                 # inherit the caller's silence and never turn it back off).
-                self._drift_silent = was_silent
+                _drift_silent_var.reset(silent_token)
                 # Same reasoning for _current_step — restore the caller's
                 # step name so a `step is X` upgrade rule keeps matching
                 # correctly for any code the caller runs after a nested
                 # step call returns.
-                self._current_step = prev_current_step
+                _current_step_var.reset(current_step_token)
 
         return wrapper
     return decorator
@@ -1545,7 +1567,7 @@ class Agent:
                 )
             except SchemaViolation:
                 if attempt < max_retries - 1:
-                    step_name = getattr(self, "_current_step", None) or "?"
+                    step_name = _current_step_var.get() or "?"
                     print(f"  ⟳  Schema violation in {step_name}, retrying ({attempt + 1}/{max_retries})")
                     continue
                 raise
@@ -1594,7 +1616,7 @@ class Agent:
         # Select model. Pass routing context so upgrade rules can fire.
         context = {
             "input_tokens": estimated_in,
-            "step": getattr(self, "_current_step", None),
+            "step": _current_step_var.get(),
         }
         model_name = self.model.select(
             self.cost_tracker.remaining, context=context
@@ -1651,7 +1673,7 @@ class Agent:
     def output(self, text: str):
         """Handle respond statements. Suppressed entirely while a `silent
         step` is on the call stack (see step_decorator)."""
-        if getattr(self, '_drift_silent', False):
+        if _drift_silent_var.get():
             return
         self._outputs.append(str(text))
         print(f"  ◆  {text}")

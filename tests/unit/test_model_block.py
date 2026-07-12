@@ -1,4 +1,6 @@
 """Tests for §4 model block form with `upgrade to ... when ...` rules."""
+import asyncio
+
 import pytest
 
 from drift import ast_nodes as ast
@@ -239,11 +241,110 @@ class TestCurrentStepScopingAtRuntime:
         sys.modules["gen_current_step2"] = mod
         spec.loader.exec_module(mod)
 
+        # _current_step is now a ContextVar (see drift/runtime/core.py's
+        # _current_step_var docstring), not a bare instance attribute —
+        # read it directly rather than via getattr(agent, ...).
+        from drift.runtime.core import _current_step_var
+
         agent = mod.A()
-        assert getattr(agent, "_current_step", None) is None
+        assert _current_step_var.get() is None
         await agent.outer()
         # Restored to the pre-call state (None), not stuck on "inner".
-        assert getattr(agent, "_current_step", None) is None
+        assert _current_step_var.get() is None
+
+    @pytest.mark.asyncio
+    async def test_current_step_does_not_leak_across_concurrent_sibling_tasks(
+        self, transpile, tmp_path
+    ):
+        # Regression: _current_step used to be a bare self.<attr> instance
+        # attribute — correctly scoped for SEQUENTIAL nesting (one step
+        # calling another internally, see the two tests above), but NOT
+        # concurrency-safe: a bare instance attribute is shared state
+        # across every task running concurrently on the same agent
+        # instance (`for each ... parallel`, a pipeline's `=>` fan-out —
+        # both run N step calls via asyncio.gather). If step_a's read of
+        # _current_step (inside intent(), building the router context)
+        # happened to run WHILE step_b's own `self._current_step =
+        # "step_b"` was still active — i.e. step_a resumes from an await
+        # during exactly the window between step_b's set and its
+        # restore — step_a's read would transiently see "step_b" instead
+        # of "step_a", misrouting its own upgrade-rule check. Fixed via
+        # contextvars.ContextVar, which gives each asyncio Task its own
+        # isolated copy — no shared mutable state between concurrent
+        # siblings at all, so this race window doesn't exist.
+        #
+        # An asyncio.Event pins down the exact race window
+        # deterministically: step_a is gated to only start ITS classify
+        # call once step_b's own classify call has already begun (and is
+        # therefore holding _current_step="step_b" for a while, via a
+        # slow provider). Plain relative sleep-based timing (a "slow"
+        # step_a vs. a "fast" step_b) does NOT reliably trigger this —
+        # intent() reads _current_step synchronously before its first
+        # await, so without an explicit barrier the read can complete
+        # entirely before the other task ever gets scheduled.
+        src = (
+            'agent A { '
+            '  model { default: "claude-haiku" upgrade to "claude-opus" when { step is step_b } } '
+            '  step step_a() -> string { '
+            '    let x = classify "a" as string '
+            '    return x '
+            '  } '
+            '  step step_b() -> string { '
+            '    let x = classify "b" as string '
+            '    return x '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_race.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_race", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_race"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+        b_is_active = asyncio.Event()
+        calls = []
+
+        class SyncProvider:
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                calls.append((prompt, model))
+                if "\nb\n" in prompt:
+                    # step_b's provider call is now in flight — signal
+                    # step_a to proceed, and stay "active" a while so
+                    # step_a's read genuinely lands inside this window.
+                    b_is_active.set()
+                    await asyncio.sleep(0.02)
+                return ('"ok"', 10, 5)
+
+        agent._provider_for = lambda model_name: SyncProvider()
+
+        # Gate step_a's intent call to only begin once step_b's own
+        # provider call (and therefore its _current_step="step_b" set)
+        # is confirmed active.
+        orig_intent_once = agent._intent_once
+
+        async def gated_intent_once(verb, input_data=None, output_schema=None, **kwargs):
+            if input_data == "a":
+                await b_is_active.wait()
+            return await orig_intent_once(verb, input_data, output_schema, **kwargs)
+
+        agent._intent_once = gated_intent_once
+
+        await asyncio.gather(agent.step_a(), agent.step_b())
+
+        a_model = next(m for p, m in calls if "\na\n" in p)
+        b_model = next(m for p, m in calls if "\nb\n" in p)
+        # step_a's own call must never see step_b's upgrade rule fire —
+        # before the fix, this was 'claude-opus' (the leak).
+        assert a_model == "claude-haiku", (
+            f"leak detected: step_a's call wrongly used {a_model!r} "
+            f"(step_b's upgrade rule fired on step_a's own call)"
+        )
+        assert b_model == "claude-opus"
 
     @pytest.mark.asyncio
     async def test_unavailability_mark_survives_a_nested_step_call(
