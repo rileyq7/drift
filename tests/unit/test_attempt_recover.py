@@ -229,3 +229,53 @@ class TestAttemptRecoverEndToEnd:
         assert result == "fallback"
         # Body ran once; arm returned; no retry
         assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_reruns_side_effects_before_the_failure_point(
+        self, transpile, tmp_path
+    ):
+        # Documents real, correct-per-docs behavior (LLM.md: "retry —
+        # restart the attempt block from the top, literally"): a side
+        # effect BEFORE the risky call inside the attempt block re-runs
+        # on every retry attempt, not just once. This isn't a bug —
+        # `retry` genuinely restarts the whole block — but it's a real
+        # footgun if you assume retries are automatically idempotent.
+        # Pinning this exact behavior so a future change doesn't silently
+        # alter it without a test noticing.
+        from drift.runtime import RateLimited
+        src = (
+            'agent A { step f() -> list<string> { '
+            '  let results = [] '
+            '  attempt { '
+            '    results.add("before") '
+            '    let r = classify "x" as string '
+            '    results.add("after") '
+            '    return results '
+            '  } recover from { RateLimited -> retry } '
+            '  return results '
+            '} }'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_retry_side_effect.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_retry_side_effect", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_retry_side_effect"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+        calls = {"n": 0}
+
+        async def flaky_intent(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RateLimited("simulated", model="x", retry_after=0)
+            return "classified"
+
+        agent.intent = flaky_intent
+        result = await agent.f()
+        # "before" appended once per attempt (3 attempts before success),
+        # "after" appended once (only reached on the successful attempt).
+        assert result == ["before", "before", "before", "after"]
+        assert calls["n"] == 3

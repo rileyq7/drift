@@ -329,7 +329,7 @@ Error types (PascalCase, matched against runtime exception classes):
 - `any error` — genuinely catches anything (`except Exception`), including non-`DriftError` exceptions like network errors from a REST/MCP tool call, exceptions raised by a `python`-kind tool's own code, or file I/O errors from `drift/io`. This is the arm to use around a `tool` call if you want the attempt block to survive an API outage or similar external failure — `DriftError` alone will not catch those.
 
 Inside a recover arm:
-- `retry` — restart the attempt block
+- `retry` — restart the attempt block **from the top, literally** — any statement before the point of failure re-executes on every attempt, including side effects. `results.add("before") ... let r = classify x as string ... results.add("after")` with `RateLimited -> retry` will append `"before"` once per attempt (not just once total) if the failure happens after the first append but before the classify call resolves — retries aren't automatically idempotent. If you need a side effect to happen exactly once regardless of retries, put it either strictly after the risky call, or outside the `attempt` block entirely (before it, if it must happen first; after it, once the attempt has already succeeded).
 - `fail "<message>"` — abort with `StepFailed`
 - Or any normal statements (fallback logic)
 
