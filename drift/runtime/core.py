@@ -1678,6 +1678,33 @@ def coerce_arg(fn, value: Any) -> Any:
 
 # ─── Runner ────────────────────────────────────────────────────────────
 
+def first_declared(classes) -> type:
+    """Return whichever class was declared FIRST in its source file.
+
+    Callers (drift run with no --agent, MCP's drift_run) build their
+    candidate-agent dict by iterating a module's names via dir(), which
+    returns names ALPHABETICALLY — not in declaration order. LLM.md
+    documents "runs the first agent's first step", so picking
+    list(agents.values())[0]/next(iter(...)) from that dict silently
+    picked whichever agent's class name happened to sort first,
+    regardless of source order, with no error or indication the "wrong"
+    agent was chosen. Every generated agent class has a real __init__;
+    its code object's line number reflects source order, mirroring how
+    this module already recovers declaration order for STEP selection
+    within a single agent (see run_agent's own co_firstlineno sort below).
+    """
+    classes = list(classes)
+    if not classes:
+        raise ValueError("first_declared() called with no classes")
+
+    def _lineno(cls):
+        init = getattr(cls, '__init__', None)
+        code = getattr(init, '__code__', None)
+        return getattr(code, 'co_firstlineno', 1 << 30)
+
+    return min(classes, key=_lineno)
+
+
 async def run_agent(agent_class: type, step_name: str = None,
                     inputs: dict = None, cost_out: dict = None) -> Any:
     """

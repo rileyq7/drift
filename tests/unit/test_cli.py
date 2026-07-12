@@ -71,6 +71,31 @@ class TestCodegenErrorSurfacing:
         assert "not implemented" in out
 
 
+class TestAgentSelectionOrder:
+    """`drift run` with no --agent must run the first-DECLARED agent, not
+    the alphabetically-first one. Regression: agents were collected via
+    dir(module), which returns names alphabetically, so `list(agents.
+    values())[0]` silently picked whichever class name sorted first —
+    contradicting LLM.md's documented "runs the first agent's first
+    step", with no error or indication the "wrong" agent ran."""
+
+    SRC = (
+        'agent Zeta { step greet() -> string { return "Hello from Zeta" } } '
+        'agent Alpha { step greet() -> string { return "Hello from Alpha" } }'
+    )
+
+    def test_first_declared_agent_runs_not_alphabetically_first(
+        self, tmp_path, capsys
+    ):
+        f = tmp_path / "order.drift"
+        f.write_text(self.SRC)
+        rc = _run_once(_args(str(f)))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Hello from Zeta" in out
+        assert "Hello from Alpha" not in out
+
+
 class TestNewScaffold:
     """`drift new` output should pass `drift check` and `drift fmt --check`
     cleanly out of the box — an LLM agent scaffolding a project and then

@@ -156,7 +156,7 @@ async def _run(source: str, input_json: str | None = None) -> dict:
             except Exception as e:
                 return {"ok": False, "stage": "import", "error": f"{type(e).__name__}: {e}"}
 
-            from drift.runtime.core import Agent, run_agent
+            from drift.runtime.core import Agent, run_agent, first_declared
             agents = {n: getattr(module, n) for n in dir(module)
                       if isinstance(getattr(module, n), type)
                       and issubclass(getattr(module, n), Agent)
@@ -164,7 +164,12 @@ async def _run(source: str, input_json: str | None = None) -> dict:
             if not agents:
                 return {"ok": False, "stage": "discover", "error": "No agents in program"}
 
-            agent_cls = next(iter(agents.values()))
+            # dir(module) returns names ALPHABETICALLY — next(iter(...))
+            # used to silently run whichever agent's class name sorted
+            # first, not the first one actually declared in the source,
+            # contradicting LLM.md's documented "runs the first agent's
+            # first step". See first_declared's docstring.
+            agent_cls = first_declared(agents.values())
             inputs = json.loads(input_json) if input_json else {}
 
             # Capture stdout so the run banner (box-drawing header, printed

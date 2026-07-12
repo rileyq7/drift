@@ -7,7 +7,7 @@ import pytest
 from drift.runtime import (
     Agent, Budget, CostTracker, ModelRouter,
     BudgetExceeded, ModelUnavailable, RateLimited, AuthError,
-    SchemaViolation, StepFailed, step_decorator, run_agent,
+    SchemaViolation, StepFailed, step_decorator, run_agent, first_declared,
 )
 from drift.runtime.core import parse_llm_response, MockProvider
 
@@ -414,6 +414,41 @@ class TestEntryStepSelection:
         result = await run_agent(Ordered)
         assert result == "triage"
         assert calls == ["triage"]
+
+
+class TestFirstDeclared:
+    """first_declared() — used by drift run (no --agent) and MCP's
+    drift_run to recover source declaration order for AGENT selection,
+    the class-level analogue of TestEntryStepSelection's step-level fix
+    above. Both callers used to build their candidate dict via dir(module)
+    (alphabetical), so `next(iter(...))`/`list(...)[0]` silently picked
+    whichever agent's class NAME sorted first, not the one declared
+    first in the .drift source."""
+
+    def test_returns_first_declared_not_alphabetically_first(self):
+        class Zeta(Agent):
+            def __init__(self):
+                super().__init__(name="Zeta")
+
+        class Alpha(Agent):
+            def __init__(self):
+                super().__init__(name="Alpha")
+
+        # Zeta is declared (defined) first in this file, even though
+        # "Alpha" sorts first alphabetically.
+        assert first_declared([Alpha, Zeta]) is Zeta
+        assert first_declared([Zeta, Alpha]) is Zeta
+
+    def test_single_class(self):
+        class Solo(Agent):
+            def __init__(self):
+                super().__init__(name="Solo")
+
+        assert first_declared([Solo]) is Solo
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError):
+            first_declared([])
 
 
 # ─── --input JSON coercion into schema-typed step parameters ─────────

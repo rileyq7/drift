@@ -24,7 +24,26 @@ SCHEDULE_PIPELINE = (
 )
 
 
+ORDER_SRC = (
+    'agent Zeta { step greet() -> string { return "Hello from Zeta" } } '
+    'agent Alpha { step greet() -> string { return "Hello from Alpha" } }'
+)
+
+
 class TestDriftRun:
+    @pytest.mark.asyncio
+    async def test_run_selects_first_declared_agent_not_alphabetical(
+        self, monkeypatch
+    ):
+        # Regression: agents were collected via dir(module) — alphabetical
+        # order — then `next(iter(agents.values()))` silently ran
+        # whichever agent's class name sorted first, contradicting
+        # LLM.md's documented "runs the first agent's first step".
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(ORDER_SRC, "{}")
+        assert result["ok"] is True
+        assert result["result"] == "Hello from Zeta"
+
     @pytest.mark.asyncio
     async def test_run_inside_event_loop(self, monkeypatch):
         # We are inside pytest-asyncio's running loop — this is exactly the

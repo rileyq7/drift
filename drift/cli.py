@@ -463,7 +463,7 @@ def _run_once(args):
             for d in added_dirs:
                 sys.path.remove(d)
 
-        from drift.runtime.core import Agent, run_agent
+        from drift.runtime.core import Agent, run_agent, first_declared
         agents = {}
         pipelines = {}
         for name in dir(module):
@@ -509,7 +509,17 @@ def _run_once(args):
                 )
                 return 1
         else:
-            agent_cls = list(agents.values())[0]
+            # LLM.md documents "drift run (no --agent/--pipeline) runs the
+            # first agent's first step" — but `agents` was built by
+            # iterating dir(module), which returns names ALPHABETICALLY,
+            # not in declaration order. Whichever agent's class name
+            # happened to sort first silently won regardless of source
+            # order, with no indication the "wrong" agent was chosen.
+            # Recover declaration order the same way run_agent() already
+            # does for STEP selection within an agent (co_firstlineno):
+            # every generated agent class has a real __init__, whose code
+            # object's line number reflects source order.
+            agent_cls = first_declared(agents.values())
 
         inputs = {}
         if args.input:
