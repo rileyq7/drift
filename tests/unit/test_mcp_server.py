@@ -177,6 +177,103 @@ class TestDriftRun:
         assert "banner" not in result
 
 
+PIPELINE_SRC = (
+    'agent Triager { step classify(x: string) -> string { return "urgent" } } '
+    'pipeline P { '
+    '  use Triager '
+    '  step tickets(batch: list<string>) -> list<string> { return batch } '
+    '  tickets -> Triager.classify '
+    '}'
+)
+
+PIPELINE_ONLY_SRC = (
+    'pipeline OnlyPipeline { '
+    '  step tickets(batch: list<string>) -> list<string> { return batch } '
+    '  step process(batch: list<string>) -> string { return "done" } '
+    '  tickets -> process '
+    '}'
+)
+
+
+class TestDriftRunPipelines:
+    """Regression: drift_run never looked for pipelines at all — a source
+    declaring a `pipeline` (with or without agents) either silently ran an
+    agent step instead of the pipeline, or crashed with a misleading
+    `kind: "bug"` (AttributeError from feeding pipeline-shaped input into
+    the dict-oriented agent-input coercion path) when pipeline-shaped
+    input was passed. LLM.md's MCP section documents only ONE limitation
+    for drift_run (cross-file imports) — this gap was undocumented.
+    """
+
+    @pytest.mark.asyncio
+    async def test_pipeline_arg_runs_the_named_pipeline(self, monkeypatch):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(PIPELINE_SRC, '["a", "b"]', pipeline="P")
+        assert result == {"ok": True, "result": "urgent"}
+
+    @pytest.mark.asyncio
+    async def test_without_pipeline_arg_agent_still_runs_by_default(
+        self, monkeypatch
+    ):
+        # Backward compatible: a source with BOTH an agent and a pipeline,
+        # called with no `pipeline` arg, still runs the agent — existing
+        # callers that never knew about pipelines see no behavior change.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(PIPELINE_SRC, '{"x": "hi"}')
+        assert result["ok"] is True
+        assert result["result"] == "urgent"
+
+    @pytest.mark.asyncio
+    async def test_pipeline_only_source_without_pipeline_arg_gives_actionable_error(
+        self, monkeypatch
+    ):
+        # Previously: silently ran nothing sensible or crashed opaquely.
+        # Now: a clear, actionable {ok: false, ...} naming the available
+        # pipeline, not a raw AttributeError misattributed as kind: "bug".
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(PIPELINE_ONLY_SRC, '["a"]')
+        assert result["ok"] is False
+        assert "OnlyPipeline" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_pipeline_only_source_with_pipeline_arg_runs(self, monkeypatch):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(PIPELINE_ONLY_SRC, '["a"]', pipeline="OnlyPipeline")
+        assert result == {"ok": True, "result": "done"}
+
+    @pytest.mark.asyncio
+    async def test_unknown_pipeline_name_gives_actionable_error(self, monkeypatch):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(PIPELINE_SRC, '[]', pipeline="DoesNotExist")
+        assert result["ok"] is False
+        assert "not found" in result["error"]
+        assert "P" in result["error"]
+
+
+class TestDriftRunMalformedInput:
+    @pytest.mark.asyncio
+    async def test_malformed_input_json_returns_ok_false_not_raises(
+        self, monkeypatch
+    ):
+        # Regression: json.loads(input_json) was called before the
+        # try/except that wraps the rest of _run, so malformed JSON raised
+        # straight out of the function instead of the documented
+        # {ok: false, ...} envelope every other failure mode here uses.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(HELLO, "not valid json")
+        assert result["ok"] is False
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_malformed_input_json_with_pipeline_also_returns_ok_false(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(PIPELINE_SRC, "{not json", pipeline="P")
+        assert result["ok"] is False
+        assert "error" in result
+
+
 class TestCheckAndTranspile:
     def test_check_ok(self):
         assert _check(HELLO) == {"ok": True}

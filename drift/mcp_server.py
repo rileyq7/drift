@@ -6,7 +6,7 @@ server and gain three tools:
 
   - drift_check(source)   → "OK" or parse-error message
   - drift_transpile(source) → generated Python
-  - drift_run(source, input=None) → cost-tracked run, returns result + cost
+  - drift_run(source, input=None, pipeline=None) → cost-tracked run, returns result + cost
 
 Launch with `drift mcp` (stdio). Wire it into Claude Code via .mcp.json:
 
@@ -92,13 +92,27 @@ def _split_cost_and_outputs(snapshot: dict | None) -> tuple[dict | None, list]:
     return snapshot, outputs
 
 
-async def _run(source: str, input_json: str | None = None) -> dict:
+async def _run(source: str, input_json: str | None = None,
+                pipeline: str | None = None) -> dict:
     """Transpile + exec a Drift program against the runtime. Returns
     {ok, result?, cost?, outputs?, error?, stage?, kind?} — `cost` is a
     {total_cost, budget, currency, calls} snapshot and `outputs` is the
     list of `respond`-statement lines the agent printed, both present on
     success and on a "run"-stage failure (a run can spend real money and
     produce partial output before failing).
+
+    `pipeline`, if given, names a `pipeline` declaration to run instead of
+    an agent — mirrors `drift run --pipeline <name>`. Without it, a
+    program containing ONLY pipelines (no agents) auto-runs its
+    first-declared pipeline; a program with agents always prefers agent
+    execution unless `pipeline` is explicitly given, matching this
+    module's own prior (agent-only) behavior for anyone not using
+    pipelines. Previously this function never looked for pipelines at
+    all — it silently ran an agent's step directly even when the source
+    declared a pipeline, or crashed with a misleading `kind: "bug"` if
+    pipeline-shaped (list) input was passed, both undocumented gaps
+    against LLM.md's own claim that drift_run's only limitation is
+    cross-file imports.
 
     Async because it awaits the agent directly: the MCP server calls this from
     an already-running event loop, so `asyncio.run()` here would raise
@@ -110,6 +124,16 @@ async def _run(source: str, input_json: str | None = None) -> dict:
         return {"ok": False, "stage": "lex", "error": str(e)}
     except ParseError as e:
         return {"ok": False, "stage": "parse", "error": str(e)}
+
+    try:
+        parsed_input = json.loads(input_json) if input_json else None
+    except json.JSONDecodeError as e:
+        # Previously unguarded — a malformed `input` string raised
+        # straight out of this function instead of returning the
+        # documented {ok: false, ...} envelope every other failure mode
+        # here uses, breaking the "uniform shape across all three tools"
+        # contract described in the drift_run tool description.
+        return {"ok": False, "stage": "input", "error": f"invalid input JSON: {e}"}
 
     with tempfile.TemporaryDirectory() as td:
         py_path = Path(td) / "drift_program.py"
@@ -161,7 +185,62 @@ async def _run(source: str, input_json: str | None = None) -> dict:
                       if isinstance(getattr(module, n), type)
                       and issubclass(getattr(module, n), Agent)
                       and getattr(module, n) is not Agent}
+            # Pipelines are plain classes (not Agent subclasses) with an
+            # async `run` method — same shape-based detection cli.py's
+            # _run_once already uses. Previously this function never
+            # looked for pipelines at all: a program declaring ONLY a
+            # `pipeline { ... }` (no agent) silently ran an agent step
+            # anyway (whichever agent a nested `use`d/referenced class
+            # happened to expose), or — if pipeline-shaped (list) input
+            # was passed — crashed with a misleading `kind: "bug"`
+            # (AttributeError: 'list' object has no attribute 'items'
+            # from _coerce_inputs' dict-oriented code path), implying a
+            # defect in the user's program rather than an unsupported
+            # tool-side gap.
+            pipelines = {}
+            for n in dir(module):
+                if n.startswith('_'):
+                    continue
+                obj = getattr(module, n)
+                if not isinstance(obj, type) or obj is Agent or n in agents:
+                    continue
+                run_attr = getattr(obj, 'run', None)
+                if run_attr is not None and asyncio.iscoroutinefunction(run_attr):
+                    pipelines[n] = obj
+
+            if pipeline:
+                pipe_cls = pipelines.get(pipeline)
+                if not pipe_cls:
+                    avail = ', '.join(pipelines) if pipelines else '(none)'
+                    return {
+                        "ok": False, "stage": "discover",
+                        "error": f"Pipeline {pipeline!r} not found. Available: {avail}",
+                    }
+                old_out = sys.stdout
+                buf = io.StringIO()
+                sys.stdout = buf
+                try:
+                    result = await pipe_cls().run(initial_input=parsed_input)
+                except Exception as e:
+                    sys.stdout = old_out
+                    return {
+                        "ok": False, "stage": "run", "kind": "bug",
+                        "error": f"{type(e).__name__}: {e}",
+                    }
+                finally:
+                    sys.stdout = old_out
+                return {"ok": True, "result": _to_jsonable(result)}
+
             if not agents:
+                if pipelines:
+                    avail = ', '.join(pipelines)
+                    return {
+                        "ok": False, "stage": "discover",
+                        "error": (
+                            f"No agents found, but pipelines are: {avail}. "
+                            "Pass pipeline=<name> to run one."
+                        ),
+                    }
                 return {"ok": False, "stage": "discover", "error": "No agents in program"}
 
             # dir(module) returns names ALPHABETICALLY — next(iter(...))
@@ -170,7 +249,7 @@ async def _run(source: str, input_json: str | None = None) -> dict:
             # contradicting LLM.md's documented "runs the first agent's
             # first step". See first_declared's docstring.
             agent_cls = first_declared(agents.values())
-            inputs = json.loads(input_json) if input_json else {}
+            inputs = parsed_input if parsed_input is not None else {}
 
             # Capture stdout so the run banner (box-drawing header, printed
             # cost report, etc.) doesn't pollute the MCP channel. Its
@@ -293,18 +372,28 @@ def serve_stdio():
                 description=(
                     "Transpile and execute a Drift program (this spends real LLM budget — "
                     "run drift_check first to catch syntax/codegen errors for free). Optional "
-                    "`input` is a JSON object mapping step parameter names to values, passed "
-                    "as a JSON-encoded string. Returns {ok, result, cost, outputs} on success "
-                    "— cost is {total_cost, budget, currency, calls}, outputs is the list of "
-                    "the agent's `respond`-statement lines — or {ok: false, stage, kind, error, "
-                    "cost, outputs} on failure, where kind is one of budget/auth/business-logic/"
-                    "bug and cost/outputs reflect spend and output produced before the failure."
+                    "`input` is a JSON-encoded string — an object mapping step parameter names "
+                    "to values for an agent run, or the pipeline's initial input (any JSON "
+                    "value) when `pipeline` is given. Optional `pipeline` names a `pipeline` "
+                    "declaration to run instead of an agent (required if the source declares "
+                    "only pipelines, no agents — mirrors `drift run --pipeline <name>`). "
+                    "Returns {ok, result, cost, outputs} on success — cost is {total_cost, "
+                    "budget, currency, calls}, outputs is the list of the agent's `respond`-"
+                    "statement lines (agent runs only; a pipeline's own cost/outputs aren't "
+                    "separately tracked) — or {ok: false, stage, kind, error, cost, outputs} on "
+                    "failure, where kind is one of budget/auth/business-logic/bug and "
+                    "cost/outputs reflect spend and output produced before the failure. Note: "
+                    "cross-file `import` doesn't resolve here (raw source text, no file path)."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "source": {"type": "string"},
-                        "input": {"type": "string", "description": "JSON object as a string"},
+                        "input": {"type": "string", "description": "JSON value as a string"},
+                        "pipeline": {
+                            "type": "string",
+                            "description": "Name of a `pipeline` declaration to run instead of an agent",
+                        },
                     },
                     "required": ["source"],
                 },
@@ -318,7 +407,9 @@ def serve_stdio():
         elif name == "drift_transpile":
             result = _transpile_result(arguments["source"])
         elif name == "drift_run":
-            result = await _run(arguments["source"], arguments.get("input"))
+            result = await _run(
+                arguments["source"], arguments.get("input"), arguments.get("pipeline")
+            )
         else:
             result = {"ok": False, "error": f"unknown tool {name!r}"}
 
