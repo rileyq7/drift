@@ -49,7 +49,7 @@ Comments may appear anywhere whitespace can. The lexer preserves them; `drift fm
 | List | `[a, b, c]` | list |
 | Range | `0 to 100`, `1 to 10` | numeric range |
 
-Currency and duration literals are only valid inside `budget:` and time-related fields. They are not general numbers.
+Currency and duration literals are *intended* for `budget:` and time-related fields — that's the only place they're documented and the only place that makes semantic sense. In practice the parser doesn't restrict where they can appear: `let price = $5.00` or `let x = 5m` both parse and transpile cleanly, silently discarding the unit and becoming a plain number (`5.0`, `300.0` seconds respectively) usable anywhere a `number` is. This isn't enforced — don't rely on using a currency/duration literal outside a budget/time field being rejected.
 
 ---
 

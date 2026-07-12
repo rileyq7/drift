@@ -325,6 +325,30 @@ class TestRespond:
         assert 'f"set notation: {{1, 2, 3}}"' in out
 
 
+class TestCurrencyDurationAreNotRestrictedToTheirDocumentedFields:
+    """LLM.md documents currency/duration literals as intended only for
+    `budget:`/time-related fields, but says explicitly (per this pinned
+    behavior) that this is NOT enforced by the parser — a currency or
+    duration literal used as a general number silently discards its unit
+    and becomes a plain float, usable anywhere a number is. Pinning the
+    documented (not fixed — deliberately left as a known gap) behavior
+    so a future change doesn't silently alter it without a test noticing.
+    """
+
+    def test_currency_literal_as_general_number(self, transpile):
+        out = transpile(
+            'agent A { step f() -> number { let price = $5.00 return price } }'
+        )
+        assert "price = 5.0" in out
+
+    def test_duration_literal_as_general_number(self, transpile):
+        out = transpile(
+            'agent A { step f() -> number { let x = 5m return x } }'
+        )
+        # 5 minutes -> 300 seconds, a plain float with no unit tracking.
+        assert "x = 300.0" in out
+
+
 class TestImports:
     def test_runtime_imports_present(self, transpile):
         out = transpile("schema X { a: string }")
