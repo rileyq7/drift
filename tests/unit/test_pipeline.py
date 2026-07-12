@@ -199,6 +199,39 @@ class TestPipelineEndToEnd:
         assert isinstance(result, list)
 
     @pytest.mark.asyncio
+    async def test_fanout_item_coerced_to_schema_dataclass(self, transpile, tmp_path):
+        # Regression: a `=>` fan-out target with a schema-typed parameter
+        # used to receive the raw JSON-decoded dict/list item verbatim
+        # (--input is never mapped by keyword for pipelines — it's passed
+        # as the entry node's single positional value), so attribute
+        # access on the item crashed with AttributeError. coerce_arg()
+        # must run before each fan-out call, using the target's own type
+        # hint, exactly the way a --pipeline --input '[{"ticket_id": ...}]'
+        # run needs it to.
+        src = (
+            "schema Ticket { ticket_id: string ticket_text: string } "
+            "agent Intake { step tickets(batch: list<Ticket>) -> list<Ticket> "
+            "  { return batch } } "
+            "agent Router { step route(ticket: Ticket) -> string "
+            "  { return ticket.ticket_id } } "
+            "pipeline P { use Intake use Router tickets => Router.route }"
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_coerce.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_coerce", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_coerce"] = mod
+        spec.loader.exec_module(mod)
+        pipe = mod.P()
+        result = await pipe.run(initial_input=[
+            {"ticket_id": "T-1", "ticket_text": "x"},
+            {"ticket_id": "T-2", "ticket_text": "y"},
+        ])
+        assert result == ["T-1", "T-2"]
+
+    @pytest.mark.asyncio
     async def test_timeout_actually_fires(self, transpile, tmp_path):
         import asyncio
         src = (

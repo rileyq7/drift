@@ -385,6 +385,104 @@ class TestEntryStepSelection:
         assert calls == ["triage"]
 
 
+# ─── --input JSON coercion into schema-typed step parameters ─────────
+
+class TestInputCoercion:
+    """run_agent's inputs (parsed JSON from CLI --input / MCP drift_run
+    input) used to be spread as **kwargs with no type coercion — a
+    schema-typed step parameter arrived as a bare dict, and `param.field`
+    crashed with AttributeError even though this is the documented way to
+    pass structured input (LLM.md: "--input takes a JSON object mapped to
+    the step's parameters by name")."""
+
+    @pytest.mark.asyncio
+    async def test_dict_coerced_to_dataclass_param(self):
+        @dataclass
+        class Item:
+            name: str
+            qty: int
+
+        class A(Agent):
+            def __init__(self):
+                super().__init__(name="A", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def f(self, item: Item):
+                return item.name
+
+        result = await run_agent(A, inputs={"item": {"name": "widget", "qty": 5}})
+        assert result == "widget"
+
+    @pytest.mark.asyncio
+    async def test_bare_list_param_passes_through_unchanged(self):
+        # `list` (no generic) parameter has no element type hint to coerce
+        # against — coercion should safely no-op (dicts stay dicts) rather
+        # than crash on the ambiguity.
+        class A(Agent):
+            def __init__(self):
+                super().__init__(name="A", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def f(self, tickets: list):
+                return [t["ticket_id"] for t in tickets]
+
+        result = await run_agent(A, inputs={"tickets": [{"ticket_id": "T-1", "text": "x"}]})
+        assert result == ["T-1"]
+
+    @pytest.mark.asyncio
+    async def test_typed_list_of_dataclass_param(self):
+        @dataclass
+        class Ticket:
+            ticket_id: str
+            text: str
+
+        class A(Agent):
+            def __init__(self):
+                super().__init__(name="A", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def f(self, tickets: list[Ticket]):
+                return [t.ticket_id for t in tickets]
+
+        result = await run_agent(A, inputs={
+            "tickets": [{"ticket_id": "T-1", "text": "x"}, {"ticket_id": "T-2", "text": "y"}]
+        })
+        assert result == ["T-1", "T-2"]
+
+    @pytest.mark.asyncio
+    async def test_primitive_values_pass_through_unchanged(self):
+        class A(Agent):
+            def __init__(self):
+                super().__init__(name="A", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def f(self, name: str, count: int):
+                return f"{name}:{count}"
+
+        result = await run_agent(A, inputs={"name": "Riley", "count": 3})
+        assert result == "Riley:3"
+
+    @pytest.mark.asyncio
+    async def test_already_correct_dataclass_instance_passes_through(self):
+        # Internal callers (cross-agent calls, pipeline nodes with a
+        # non-JSON-sourced value) may already pass a real instance —
+        # coercion must not double-wrap or break that.
+        @dataclass
+        class Item:
+            name: str
+
+        class A(Agent):
+            def __init__(self):
+                super().__init__(name="A", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def f(self, item: Item):
+                return item.name
+
+        result = await run_agent(A, inputs={"item": Item(name="widget")})
+        assert result == "widget"
+
+
 # ─── Cost reporting on run_agent (success and failure) ───────────────
 
 class TestRunAgentCostOut:

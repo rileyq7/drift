@@ -80,27 +80,60 @@ CURRENCY_MAP = {'£': 'GBP', '$': 'USD', '€': 'EUR'}
 
 
 class CodeGenerator:
+    # The only stdlib functions that are `async def` (drift/io/__init__.py,
+    # drift/notify/__init__.py, drift/time/__init__.py) — everything else
+    # in the stdlib (drift/safety, drift/data, drift/text, drift/observe,
+    # and the rest of drift/io and drift/notify) is plain sync. This list
+    # mirrors those modules directly; update it if a stub there ever
+    # becomes a real `async def`.
+    ASYNC_STDLIB_FNS = {'fetch_url', 'webhook', 'wait'}
+
     def __init__(self):
         self.indent_level = 0
         self.lines: list[str] = []
         self.schemas_declared: list[str] = []
         self.agent_names: set[str] = set()
+        self.async_tool_names: set[str] = set()
+        self.async_stdlib_imports: set[str] = set()
 
     def generate(self, program: ast.Program) -> str:
         """Generate complete Python source from a Drift program."""
         self.emit_header()
         self.emit_line("")
 
-        # First pass: collect all schema names and agent names. Agent
-        # names are needed by gen_fn_call to detect cross-agent step
-        # invocations like `GrantChecker.evaluate(x)` and emit a
-        # one-shot agent instantiation + await rather than calling an
-        # unbound method.
+        # First pass: collect all schema names, agent names, and tool
+        # names. Agent names are needed by gen_fn_call to detect
+        # cross-agent step invocations like `GrantChecker.evaluate(x)` and
+        # emit a one-shot agent instantiation + await rather than calling
+        # an unbound method. Tool names of kind mcp/rest are needed for the
+        # same reason: their generated methods are always `async def`
+        # (McpTool.__getattr__'s _invoke, and REST tools' generated action
+        # methods), so a call like `weather.get_forecast(...)` needs
+        # `await` too — without it, Python returns the coroutine object
+        # itself without ever running the call (no error, no warning
+        # until GC, and the real API/MCP call never happens). `python`-kind
+        # tools call directly into a user's own module function, whose
+        # sync/async-ness Drift can't know, so those are left as-is.
         for decl in program.declarations:
             if isinstance(decl, ast.SchemaDecl):
                 self.schemas_declared.append(decl.name)
             elif isinstance(decl, ast.AgentDecl):
                 self.agent_names.add(decl.name)
+            elif isinstance(decl, ast.ToolDecl) and decl.kind in ("mcp", "rest"):
+                self.async_tool_names.add(decl.name)
+            elif (isinstance(decl, ast.ImportDecl)
+                    and decl.source_path.startswith("drift/")
+                    and not decl.source_path.endswith(".drift")):
+                # Stdlib import — `import { fetch_url } from "drift/io"`
+                # brings `fetch_url` into scope as a bare name (gen_import
+                # emits `from drift.io import fetch_url`, no `io.` prefix
+                # — unlike tool declarations, which bind a namespaced
+                # object). A bare call to one of the 3 async stdlib
+                # functions needs `await` for the same reason tool calls
+                # do.
+                for name in decl.names:
+                    if name in self.ASYNC_STDLIB_FNS:
+                        self.async_stdlib_imports.add(name)
 
         # Generate declarations in order
         for decl in program.declarations:
@@ -182,7 +215,7 @@ class CodeGenerator:
             '    Agent, step_decorator, Budget, ModelRouter, Intent,',
             '    CostTracker, Checkpoint, Confident, MemoryStore, run_agent,',
             '    make_memory_store, StreamThenRouter,',
-            '    register_custom_verb,',
+            '    register_custom_verb, coerce_arg,',
             '    DriftError, StepFailed, SchemaViolation, BudgetExceeded,',
             '    ModelUnavailable, RateLimited, AuthError,',
             ')',
@@ -334,7 +367,11 @@ class CodeGenerator:
                        "if p.kind != inspect.Parameter.VAR_KEYWORD]")
         self.emit_line("if non_self:")
         self.indent()
-        self.emit_line("return await fn(prev)")
+        # prev is whatever raw JSON --input decoded to (dict/list/primitive)
+        # for the entry node — coerce it against the node's declared
+        # parameter type so a schema-typed entry step gets a real dataclass
+        # instance, not a bare dict (see coerce_arg's docstring).
+        self.emit_line("return await fn(coerce_arg(fn, prev))")
         self.dedent()
         self.emit_line("return await fn()")
         self.dedent()  # end of _call_node
@@ -381,7 +418,7 @@ class CodeGenerator:
             if skip_on_failure:
                 self.emit_line("try:")
                 self.indent()
-                self.emit_line(f"_prev = await {callable_expr}(_prev)")
+                self.emit_line(f"_prev = await {callable_expr}(coerce_arg({callable_expr}, _prev))")
                 self.emit_line(f"results[{edge.to_node!r}] = _prev")
                 self.dedent()
                 self.emit_line("except Exception as _e:")
@@ -389,13 +426,16 @@ class CodeGenerator:
                 self.emit_line(f'print(f"  ⚠  skipping {target_step_name}: {{_e}}")')
                 self.dedent()
             else:
-                self.emit_line(f"_prev = await {callable_expr}(_prev)")
+                self.emit_line(f"_prev = await {callable_expr}(coerce_arg({callable_expr}, _prev))")
                 self.emit_line(f"results[{edge.to_node!r}] = _prev")
         elif edge.op == "=>":
-            # Parallel fan-out: _prev must be iterable
+            # Parallel fan-out: _prev must be iterable. Each item is
+            # coerced against the target node's parameter type — same
+            # reasoning as _call_node's entry-point coercion.
             self.emit_line(f"# parallel fan-out into {edge.to_node}")
             self.emit_line(
-                f"_prev = await asyncio.gather(*[{callable_expr}(item) for item in _prev])"
+                f"_prev = await asyncio.gather(*[{callable_expr}(coerce_arg({callable_expr}, item)) "
+                f"for item in _prev])"
             )
             self.emit_line(f"results[{edge.to_node!r}] = _prev")
         elif edge.op in ("~>", "|>"):
@@ -1040,7 +1080,16 @@ class CodeGenerator:
             self._gen_recover_body(arm)
             self.dedent()
         if default_arm:
-            self.emit_line("except DriftError as _err:")
+            # `any error` reads as "catches anything" — it must actually
+            # mean that. `except DriftError` would silently miss the exact
+            # failures an attempt/recover block around a tool call is
+            # usually written to guard against: httpx network errors from
+            # a REST tool, MCP protocol errors, exceptions from a `python`-
+            # kind tool's own implementation, file I/O errors from
+            # drift/io — none of those are DriftError subclasses. A
+            # calling agent that reads `any error -> respond "..."` and
+            # trusts the run to survive an API outage would be wrong.
+            self.emit_line("except Exception as _err:")
             self.indent()
             self._gen_recover_body(default_arm)
             self.dedent()
@@ -1356,12 +1405,24 @@ class CodeGenerator:
             if (isinstance(call.target, ast.Ident)
                     and call.target.name in self.agent_names):
                 return f"await {target}().{method}({args_str})"
+            # MCP/REST tool call: `weather.get_forecast(...)` — the
+            # generated method is always `async def` (see async_tool_names'
+            # collection comment). Without `await`, Python would silently
+            # return the coroutine object without ever running the call.
+            if (isinstance(call.target, ast.Ident)
+                    and call.target.name in self.async_tool_names):
+                return f"await {target}.{method}({args_str})"
             return f"{target}.{method}({args_str})"
 
         # Check if this is an internal step call
         step_names = getattr(self, '_agent_step_names', set())
         if call.name in step_names:
             return f"await self.{call.name}({args_str})"
+
+        # Bare call to an async stdlib import (`fetch_url(url)`,
+        # `wait(2.0)`, `webhook(url, payload)`) — see ASYNC_STDLIB_FNS.
+        if call.name in self.async_stdlib_imports:
+            return f"await {call.name}({args_str})"
 
         return f"{call.name}({args_str})"
 

@@ -152,3 +152,94 @@ class TestToolErrors:
                 'tool t { endpoint: "x" '
                 'action a() -> string { INVALID "/" } }'
             )
+
+
+class TestToolCallsAreAwaited:
+    """Regression: gen_fn_call's fallback branch (any `target.method(...)`
+    that isn't a cross-agent step call) never emitted `await`, even though
+    every mcp/rest tool's generated method is `async def`. Calling an
+    async function without awaiting it doesn't error or run the function
+    body at all — Python just hands back an unawaited coroutine object —
+    so every documented tool-call example in LLM.md (`weather.get_forecast
+    (...)`, `helpdesk.post_outcome(...)`) silently never made the real
+    call. No existing test caught this because none exercised a tool call
+    from inside a step body through the real codegen path — they only
+    checked generated text for unrelated substrings, or called the
+    module-level tool object directly from Python instead of via a step.
+    """
+
+    MCP_SRC = (
+        'tool weather from mcp "https://x.com" '
+        'agent A { model: "claude-haiku" '
+        '  step f(city: string) -> string { '
+        '    let forecast = weather.get_forecast(city: city) '
+        '    return forecast '
+        '  } '
+        '}'
+    )
+
+    REST_SRC = (
+        'tool helpdesk { '
+        '  endpoint: "https://x.com" '
+        '  auth: env("TOKEN") '
+        '  action post_outcome(id: string) -> dict { POST "/x/{id}" } '
+        '} '
+        'agent A { model: "claude-haiku" '
+        '  step f(id: string) -> dict { '
+        '    let result = helpdesk.post_outcome(id: id) '
+        '    return result '
+        '  } '
+        '}'
+    )
+
+    BARE_STMT_SRC = (
+        'tool helpdesk { '
+        '  endpoint: "https://x.com" '
+        '  auth: env("TOKEN") '
+        '  action post_outcome(id: string) -> dict { POST "/x/{id}" } '
+        '} '
+        'agent A { model: "claude-haiku" '
+        '  step f(id: string) -> string { '
+        '    helpdesk.post_outcome(id: id) '
+        '    return "done" '
+        '  } '
+        '}'
+    )
+
+    def test_mcp_call_assigned_to_let_is_awaited(self, transpile):
+        out = transpile(self.MCP_SRC)
+        assert "forecast = await weather.get_forecast(city=city)" in out
+
+    def test_rest_action_call_assigned_to_let_is_awaited(self, transpile):
+        out = transpile(self.REST_SRC)
+        assert "result = await helpdesk.post_outcome(id=id)" in out
+
+    def test_bare_statement_tool_call_is_awaited(self, transpile):
+        out = transpile(self.BARE_STMT_SRC)
+        assert "await helpdesk.post_outcome(id=id)" in out
+
+    @pytest.mark.asyncio
+    async def test_mcp_call_actually_reaches_the_mock_session(self, transpile, tmp_path, monkeypatch):
+        # End-to-end: run a real step body through the real runtime and
+        # confirm the mock MCP session actually recorded the call — this
+        # is the test class of coverage that was missing entirely; every
+        # prior MCP test either checked codegen text or called the tool
+        # object directly from Python, never through a step body.
+        from drift.runtime.mcp_client import use_mock
+        from drift.runtime import run_agent
+
+        py = transpile(self.MCP_SRC)
+        mod_path = tmp_path / "tool_call_under_test.py"
+        mod_path.write_text(py)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        mock = use_mock(responses={"get_forecast": {"forecast": "sunny"}})
+
+        import importlib, sys
+        if "tool_call_under_test" in sys.modules:
+            del sys.modules["tool_call_under_test"]
+        mod = importlib.import_module("tool_call_under_test")
+
+        result = await run_agent(mod.A, inputs={"city": "Boston"})
+        assert result == {"forecast": "sunny"}
+        assert mock.calls == [("get_forecast", {"city": "Boston"})]

@@ -15,6 +15,8 @@ import json
 import time
 import asyncio
 import dataclasses
+import inspect
+import typing
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional, Type
 from functools import wraps
@@ -1543,6 +1545,86 @@ class Agent:
         print(f"  ◆  {text}")
 
 
+def _coerce_to_hint(value: Any, hint: Any) -> Any:
+    """Recursively coerce a plain JSON-decoded value (dict/list/primitive)
+    into the dataclass instances a step's type hints declare.
+
+    `json.loads()` only ever produces dict/list/str/int/float/bool/None —
+    Python's `**inputs` call in run_agent() does NOT construct dataclass
+    instances just because a parameter is type-hinted as one, so a schema-
+    typed step parameter fed from `--input`/MCP `input` JSON used to arrive
+    as a bare dict, and any attribute access on it (`item.name`) crashed
+    with AttributeError — even though this is the documented, expected way
+    to pass structured input (LLM.md: "`--input` takes a JSON object mapped
+    to the step's parameters by name").
+    """
+    if hint is None or hint is inspect.Parameter.empty:
+        return value
+
+    origin = typing.get_origin(hint)
+    if origin is typing.Union:
+        # Optional[T] / Union[T, None] — try each branch, first match wins.
+        for arg in typing.get_args(hint):
+            if arg is type(None):
+                if value is None:
+                    return None
+                continue
+            try:
+                return _coerce_to_hint(value, arg)
+            except (TypeError, ValueError):
+                continue
+        return value
+
+    if origin is list and isinstance(value, list):
+        (elem_hint,) = typing.get_args(hint) or (None,)
+        return [_coerce_to_hint(v, elem_hint) for v in value]
+
+    if dataclasses.is_dataclass(hint) and isinstance(value, dict):
+        field_hints = typing.get_type_hints(hint)
+        kwargs = {}
+        for f in dataclasses.fields(hint):
+            if f.name in value:
+                kwargs[f.name] = _coerce_to_hint(value[f.name], field_hints.get(f.name))
+        return hint(**kwargs)
+
+    return value
+
+
+def _coerce_inputs(method, inputs: dict) -> dict:
+    """Coerce every value in `inputs` to the corresponding parameter's type
+    hint on `method`, so a schema-typed step parameter fed from parsed JSON
+    (CLI --input, MCP drift_run input) arrives as a real dataclass instance,
+    not a bare dict. Values with no matching hint pass through unchanged."""
+    try:
+        hints = typing.get_type_hints(method)
+    except Exception:
+        # A step referencing a forward/unresolvable annotation shouldn't
+        # block the run — fall back to passing inputs through as-is.
+        return inputs
+    return {k: _coerce_to_hint(v, hints.get(k)) for k, v in inputs.items()}
+
+
+def coerce_arg(fn, value: Any) -> Any:
+    """Coerce `value` against the type hint of `fn`'s first real parameter
+    (excluding `self`). Generated pipeline code calls this before invoking a
+    node — a pipeline's entry node and `=>` fan-out targets receive plain
+    JSON-decoded values (dict/list/primitive) from --input or the previous
+    node's output, and without this a schema-typed parameter arrives as a
+    bare dict (item.field -> AttributeError) instead of a real dataclass
+    instance. Mirrors _coerce_inputs, which does the same for run_agent's
+    single-agent (non-pipeline) --input path."""
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        return value
+    sig = inspect.signature(fn)
+    params = [p for p in sig.parameters.values()
+              if p.kind != inspect.Parameter.VAR_KEYWORD and p.name != 'self']
+    if not params:
+        return value
+    return _coerce_to_hint(value, hints.get(params[0].name))
+
+
 # ─── Runner ────────────────────────────────────────────────────────────
 
 async def run_agent(agent_class: type, step_name: str = None,
@@ -1602,6 +1684,12 @@ async def run_agent(agent_class: type, step_name: str = None,
                 method = getattr(agent, step_name)
             else:
                 raise DriftError(f"No steps found on agent '{agent.name}'")
+
+    # `inputs` came from parsed JSON (CLI --input / MCP drift_run input) —
+    # coerce dict/list values into the dataclass instances the step's type
+    # hints declare, so `step f(item: Schema)` gets a real Schema instance
+    # (item.field works) instead of a bare dict (item.field -> AttributeError).
+    inputs = _coerce_inputs(method, inputs)
 
     print(f"  Step: {step_name}({', '.join(f'{k}={v!r}' for k, v in inputs.items())})")
     print()

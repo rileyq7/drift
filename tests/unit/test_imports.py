@@ -50,6 +50,98 @@ class TestImportCodegen:
         assert "from drift.notify import email" in out
 
 
+class TestAsyncStdlibCallsAreAwaited:
+    """Regression: a bare call to an imported stdlib function
+    (`fetch_url(url)`, matching the actual `from drift.io import
+    fetch_url` codegen — there is no `io.` prefix at the call site) went
+    through gen_fn_call's no-target fallback, which never emitted `await`.
+    For the 3 stdlib functions that are actually `async def`
+    (fetch_url, webhook, wait), this silently returned an unawaited
+    coroutine — the real HTTP request / webhook POST / sleep never
+    happened — with no error, only a RuntimeWarning at GC time. Every
+    other stdlib function is plain sync and must NOT get `await` (that
+    would be a TypeError, worse than the original bug)."""
+
+    def _step_body(self, transpile, import_line: str, call_line: str) -> str:
+        src = (
+            f'{import_line}\n'
+            f'agent A {{ model: "claude-haiku" '
+            f'  step f(url: string) -> string {{ {call_line} return "x" }} }}'
+        )
+        return transpile(src)
+
+    def test_fetch_url_call_is_awaited(self, transpile):
+        out = self._step_body(
+            transpile,
+            'import { fetch_url } from "drift/io"',
+            'let content = fetch_url(url)',
+        )
+        assert "content = await fetch_url(url)" in out
+
+    def test_wait_call_is_awaited(self, transpile):
+        out = self._step_body(
+            transpile,
+            'import { wait } from "drift/time"',
+            'wait(1.0)',
+        )
+        assert "await wait(" in out
+
+    def test_webhook_call_is_awaited(self, transpile):
+        out = self._step_body(
+            transpile,
+            'import { webhook } from "drift/notify"',
+            'webhook(url, payload)',
+        )
+        assert "await webhook(url, payload)" in out
+
+    def test_sync_stdlib_call_is_not_awaited(self, transpile):
+        # read/redact_pii/etc. are plain sync — must NOT get `await`,
+        # which would be a TypeError against a non-awaitable return value.
+        out = self._step_body(
+            transpile,
+            'import { read } from "drift/io"',
+            'let content = read(url)',
+        )
+        assert "content = read(url)" in out
+        assert "await read(url)" not in out
+
+    @pytest.mark.asyncio
+    async def test_fetch_url_call_actually_executes(self, transpile, tmp_path, monkeypatch):
+        # End-to-end proof the real function body runs (not just an
+        # unawaited coroutine object silently discarded).
+        from drift.runtime import run_agent
+
+        py = transpile(
+            'import { fetch_url } from "drift/io"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f(url: string) -> string { '
+            '    let content = fetch_url(url) '
+            '    return content '
+            '  } }'
+        )
+        mod_path = tmp_path / "stdlib_call_under_test.py"
+        mod_path.write_text(py)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        import importlib, sys
+        if "stdlib_call_under_test" in sys.modules:
+            del sys.modules["stdlib_call_under_test"]
+        mod = importlib.import_module("stdlib_call_under_test")
+
+        # Monkeypatch fetch_url in the generated module's namespace to
+        # prove it's actually called (and awaited) rather than hitting
+        # the network in a test.
+        called = {}
+        async def fake_fetch_url(url):
+            called["url"] = url
+            return "fetched-content"
+        mod.fetch_url = fake_fetch_url
+
+        result = await run_agent(mod.A, inputs={"url": "https://example.com"})
+        assert result == "fetched-content"
+        assert called["url"] == "https://example.com"
+
+
 class TestStdlibIO:
     def test_read_write_round_trip(self, tmp_path):
         from drift.io import read, write
