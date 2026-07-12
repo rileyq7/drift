@@ -159,3 +159,99 @@ class TestParallelRuntime:
         # care that the parallel block completed and accumulated 3 items.
         assert isinstance(result, list)
         assert len(result) == 3
+
+    @pytest.mark.asyncio
+    async def test_one_failed_item_loses_the_whole_batch_without_attempt(
+        self, transpile, tmp_path, monkeypatch
+    ):
+        # Documents real, current behavior (LLM.md's "Parallel triage"
+        # pattern, as written with no attempt/recover): `parallel`
+        # compiles to a plain asyncio.gather with no return_exceptions —
+        # one item's intent call ultimately failing propagates out of the
+        # WHOLE for-each, discarding every already-collected result along
+        # with it, not just the failed item's slot. This isn't a bug to
+        # fix (gather's default semantics are standard and arguably
+        # correct to fail loud by default) but is exactly the kind of
+        # silent-until-it-bites-you gap the language docs need to call
+        # out explicitly, since "parallel batch processing" reads as if
+        # it should be resilient by default.
+        py = transpile(
+            'agent A { '
+            '  model: "claude-haiku" '
+            '  step process(xs: list<string>) -> list<string> { '
+            '    let results = [] '
+            '    for each x in xs parallel { '
+            '      let r = classify x as string '
+            '      results.add(r) '
+            '    } '
+            '    return results '
+            '  } '
+            '}'
+        )
+        mod_path = tmp_path / "agent_under_test_fail.py"
+        mod_path.write_text(py)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        import importlib, sys as _sys
+        if "agent_under_test_fail" in _sys.modules:
+            del _sys.modules["agent_under_test_fail"]
+        mod = importlib.import_module("agent_under_test_fail")
+
+        agent = mod.A()
+
+        async def flaky_intent(verb, input_data=None, output_schema=None, **kwargs):
+            if input_data == "bad":
+                raise ValueError("simulated LLM failure")
+            return f"ok:{input_data}"
+        agent.intent = flaky_intent
+
+        with pytest.raises(ValueError):
+            await agent.process(["a", "bad", "c"])
+        # The whole call raised — there is no partial "results" to
+        # inspect from the caller's side, confirming the batch-loss.
+
+    @pytest.mark.asyncio
+    async def test_attempt_recover_inside_parallel_isolates_failures(
+        self, transpile, tmp_path, monkeypatch
+    ):
+        # The documented fix (LLM.md's updated Parallel triage note):
+        # wrapping the per-item work in attempt/recover INSIDE the
+        # parallel body makes each item's failure independent — a caught
+        # item is simply missing from results instead of sinking the
+        # whole batch.
+        py = transpile(
+            'agent A { '
+            '  model: "claude-haiku" '
+            '  step process(xs: list<string>) -> list<string> { '
+            '    let results = [] '
+            '    for each x in xs parallel { '
+            '      attempt { '
+            '        let r = classify x as string '
+            '        results.add(r) '
+            '      } recover from { '
+            '        any error -> respond "skipping" '
+            '      } '
+            '    } '
+            '    return results '
+            '  } '
+            '}'
+        )
+        mod_path = tmp_path / "agent_under_test_resilient.py"
+        mod_path.write_text(py)
+        monkeypatch.syspath_prepend(str(tmp_path))
+        import importlib, sys as _sys
+        if "agent_under_test_resilient" in _sys.modules:
+            del _sys.modules["agent_under_test_resilient"]
+        mod = importlib.import_module("agent_under_test_resilient")
+
+        agent = mod.A()
+
+        async def flaky_intent(verb, input_data=None, output_schema=None, **kwargs):
+            if input_data == "bad":
+                raise ValueError("simulated LLM failure")
+            return f"ok:{input_data}"
+        agent.intent = flaky_intent
+
+        result = await agent.process(["a", "bad", "c"])
+        # The two good items survive; the bad one is simply absent —
+        # no exception, no lost batch.
+        assert sorted(result) == ["ok:a", "ok:c"]

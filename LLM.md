@@ -643,6 +643,18 @@ step sort(emails: list<string>) -> list<EmailAnalysis> {
   return results
 }
 ```
+**One failed item loses the whole batch, as written above.** `parallel` compiles to a plain `asyncio.gather` over all items — if any single item's intent call ultimately fails (e.g. `SchemaViolation` after exhausting its own retries), the exception propagates out of the whole `for each`, and every already-collected result in `results` is discarded along with it (never returned) — not just the failed item. If you're batch-processing and want the good results even when some items fail, wrap the per-item work in `attempt`/`recover` **inside** the parallel body, not around the whole `for each`:
+```drift
+for each email in emails parallel {
+  attempt {
+    let analysis = classify email as EmailAnalysis
+    results.add(analysis)
+  } recover from {
+    any error -> respond "skipping {email}: classification failed"
+  }
+}
+```
+This makes each item's failure independent — a caught item is simply missing from `results` instead of taking every other item down with it.
 
 ### Retry with budget escape
 ```drift
