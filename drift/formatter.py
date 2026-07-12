@@ -140,7 +140,7 @@ def _render_token(t: Token) -> str:
     return t.value
 
 
-_TYPE_GENERIC_HEADS = {"list", "dict", "set", "tuple", "optional"}
+_TYPE_GENERIC_HEADS = {"list", "dict", "set", "tuple", "optional", "confident"}
 
 
 def _is_type_open(prev: Token) -> bool:

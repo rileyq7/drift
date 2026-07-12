@@ -63,3 +63,20 @@ class TestFormatterIdempotence:
         # "point one" was nested deeper than "a note:" in the source —
         # that relative nesting must survive, not just absolute stability.
         assert point_indent > note_indent
+
+    def test_confident_generic_stays_tight_no_spaces(self):
+        # Regression: `confident<T>` wasn't in _TYPE_GENERIC_HEADS
+        # (list/dict/set/tuple/optional were, confident was missing), so
+        # the formatter added spaces around the angle brackets —
+        # `confident<Foo>` became `confident < Foo >` — directly
+        # contradicting LLM.md's own claim that the formatter normalizes
+        # (removes) spaces inside generic types.
+        src = (
+            'agent A { step f() -> string { '
+            'let x = rate y against z as confident<Foo> '
+            'return x } }'
+        )
+        once = format_source(src)
+        assert 'confident<Foo>' in once
+        assert 'confident < Foo >' not in once
+        assert format_source(once) == once
