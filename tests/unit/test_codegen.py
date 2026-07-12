@@ -143,6 +143,23 @@ class TestIntentCodegen:
         )
         assert 'input_data="a state-of-the-art summary"' in out
 
+    def test_missing_as_clause_does_not_swallow_following_return(self, parse_ast):
+        # Regression: the free-form description word-collection loop only
+        # stopped at clause keywords (as/from/in/against/to/using/
+        # considering/with) or newline/brace — not at other statement-
+        # starting keywords. `generate a reply return m` (a missing `as`
+        # clause followed by a legitimate `return` statement on the same
+        # line) used to swallow "return m" as more description text
+        # instead of parsing it as its own ReturnStmt, silently dropping
+        # the return.
+        src = 'agent A { step f() -> string { let m = classify x return m } }'
+        p = parse_ast(src)
+        agent = p.declarations[0]
+        body = agent.steps[0].body
+        assert len(body) == 2
+        assert body[1].__class__.__name__ == "ReturnStmt"
+        assert body[1].value.name == "m"
+
 
 class TestControlFlowCodegen:
     def test_if_otherwise_chain(self, transpile):

@@ -1,0 +1,107 @@
+-- ticket_triage.drift — support ticket triage pipeline
+--
+-- Classifies incoming support tickets, drafts a response when confident,
+-- and escalates to a human when not. Posts the outcome to a helpdesk API
+-- (mocked here via `env("HELPDESK_TOKEN")` — unset in dev, so the REST
+-- call will fail loudly rather than silently; see the `attempt/recover`
+-- guard around it in Router.route).
+config {
+  name: "Ticket Triage"
+  version: "0.1.0"
+}
+
+schema Ticket {
+  ticket_id: string
+  ticket_text: string
+}
+
+schema TicketAnalysis {
+  category: one of "billing", "technical", "account", "general"
+  urgency: one of "low", "medium", "high", "critical"
+  summary: string
+  confidence: number between 0 and 1
+}
+
+schema Outcome {
+  ticket_id: string
+  category: string
+  urgency: string
+  action: one of "responded", "escalated"
+  detail: string
+}
+
+tool helpdesk {
+  endpoint: "https://helpdesk.example.com/api"
+  auth: env("HELPDESK_TOKEN")
+  action post_outcome(ticket_id: string, action: string, detail: string) -> dict {
+    POST "/tickets/{ticket_id}/outcome"
+  }
+}
+
+agent Intake {
+  model: "claude-haiku"
+  budget: $0.01 per run
+  -- Pipeline entry node: every node is a step call, so the batch of
+  -- tickets passed as --input flows through here first and back out
+  -- unchanged, just to give the pipeline a named starting point.
+  step tickets(batch: list<Ticket>) -> list<Ticket> {
+    return batch
+  }
+}
+
+agent Responder {
+  model: prefer "claude-haiku" fallback "gpt-4o-mini"
+  budget: $0.10 per run
+  quality: 0.75 minimum confidence
+  step draft_reply(ticket_text: string, category: string) -> string {
+    let reply = generate "a helpful reply to this support ticket" considering category as string
+    return reply
+  }
+}
+
+agent Router {
+  model: "claude-haiku"
+  budget: $0.05 per run
+  step route(ticket: Ticket) -> Outcome {
+    let scored = rate ticket.ticket_text against "urgency and category fit" as confident<TicketAnalysis>
+    if scored is confident {
+      let reply = Responder.draft_reply(ticket.ticket_text, scored.value.category)
+      respond "Ticket {ticket.ticket_id}: responded ({scored.value.category}/{scored.value.urgency})"
+      attempt {
+        helpdesk.post_outcome(ticket_id: ticket.ticket_id, action: "responded", detail: reply)
+      }
+      recover from {
+        any error -> respond "helpdesk post failed for {ticket.ticket_id}, continuing anyway"
+      }
+      return Outcome {
+        ticket_id: ticket.ticket_id,
+        category: scored.value.category,
+        urgency: scored.value.urgency,
+        action: "responded",
+        detail: reply
+      }
+    }
+    otherwise {
+      respond "Ticket {ticket.ticket_id}: escalated (low confidence)"
+      attempt {
+        helpdesk.post_outcome(ticket_id: ticket.ticket_id, action: "escalated", detail: "needs human review")
+      }
+      recover from {
+        any error -> respond "helpdesk post failed for {ticket.ticket_id}, continuing anyway"
+      }
+      return Outcome {
+        ticket_id: ticket.ticket_id,
+        category: scored.value.category,
+        urgency: scored.value.urgency,
+        action: "escalated",
+        detail: "needs human review"
+      }
+    }
+  }
+}
+
+pipeline Triage {
+  use Intake use Responder use Router
+  timeout: 60s
+  tickets => Router.route on failure in route: skip and continue
+}

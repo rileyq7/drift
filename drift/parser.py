@@ -26,6 +26,18 @@ INTENT_CLAUSE_KEYWORDS = {
 
 STEP_MODIFIERS = {'cached', 'parallel', 'manual', 'silent'}
 
+# Keywords parse_statement() dispatches on to start a NEW statement (mirrors
+# the if/elif chain there). A free-form intent-input description is
+# collected word-by-word up to the next clause keyword or one of these — if
+# it weren't stopped here too, a following `return`/`respond`/etc. on the
+# same line could be silently swallowed into the description text instead
+# of parsing as its own statement (e.g. `generate a reply return m` would
+# eat "return m" as more description, dropping the actual return).
+STATEMENT_KEYWORDS = {
+    'let', 'return', 'respond', 'if', 'for', 'match', 'attempt', 'retry',
+    'fail', 'remember', 'deja_vu', 'forget', 'recall',
+}
+
 
 class ParseError(Exception):
     def __init__(self, message: str, token: Token):
@@ -1524,7 +1536,8 @@ class Parser:
                             while (not self.at_end() and
                                    self.peek().type not in (TT.NEWLINE, TT.RBRACE, TT.EOF) and
                                    not (self.peek().type == TT.IDENT and
-                                        self.peek().value in INTENT_CLAUSE_KEYWORDS)):
+                                        (self.peek().value in INTENT_CLAUSE_KEYWORDS or
+                                         self.peek().value in STATEMENT_KEYWORDS))):
                                 words.append(self.eat().value)
                             text = words[0] if words else ""
                             for w in words[1:]:
