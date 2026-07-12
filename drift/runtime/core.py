@@ -1361,9 +1361,18 @@ def step_decorator(output=None, modifier=""):
                 setattr(exc, '_drift_step', step_name)
                 return exc
 
+            # Every step call establishes its OWN silence state for the
+            # duration of its execution — not just conditionally turning
+            # silence on and leaving any inherited state untouched
+            # otherwise. Without this, a `silent` step calling a
+            # non-silent step internally left `_drift_silent` (a single
+            # flag on the agent instance, not scoped per call frame) set
+            # to True the whole time, so the inner step's own `respond`
+            # calls were silently suppressed too — directly contradicting
+            # the documented behavior ("nested non-silent steps called
+            # from within it are unaffected once they return").
             was_silent = getattr(self, '_drift_silent', False)
-            if modifier == "silent":
-                self._drift_silent = True
+            self._drift_silent = (modifier == "silent")
 
             try:
                 last_error = None
@@ -1418,8 +1427,13 @@ def step_decorator(output=None, modifier=""):
                     f"Step '{step_name}' failed after {max_retries} attempts: {last_error}"
                 ))
             finally:
-                if modifier == "silent":
-                    self._drift_silent = was_silent
+                # Always restore — every call now sets its own silence
+                # state above, so every call must also restore the
+                # caller's state on the way out (previously this only
+                # ran for modifier == "silent", which is exactly the gap
+                # that let a nested non-silent step's own respond calls
+                # inherit the caller's silence and never turn it back off).
+                self._drift_silent = was_silent
 
         return wrapper
     return decorator

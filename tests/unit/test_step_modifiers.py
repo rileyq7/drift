@@ -96,6 +96,65 @@ class TestSilentStep:
         await agent.f()
         assert agent._outputs == ["visible"]
 
+    @pytest.mark.asyncio
+    async def test_nested_non_silent_step_called_from_silent_step_is_not_suppressed(
+        self, transpile, tmp_path
+    ):
+        # Regression: LLM.md documents silent as scoped to "that step
+        # only; nested non-silent steps called from within it are
+        # unaffected once they return." But `_drift_silent` is a single
+        # flag on the AGENT INSTANCE, not scoped per call frame — the
+        # old code only ever set it to True (never explicitly False), so
+        # a silent step calling a non-silent step internally left the
+        # flag set to True for the whole nested call, silently
+        # suppressing the inner step's own respond output too.
+        src = (
+            "agent A { "
+            "  silent step outer() -> string { "
+            "    respond \"outer message\" "
+            "    let x = inner() "
+            "    return x "
+            "  } "
+            "  step inner() -> string { "
+            "    respond \"inner message\" "
+            "    return \"done\" "
+            "  } "
+            "}"
+        )
+        mod = _load(transpile, src, "silent_nested_mod", tmp_path)
+        agent = mod.A()
+        result = await agent.outer()
+        assert result == "done"
+        # "outer message" correctly suppressed (outer IS silent);
+        # "inner message" must NOT be suppressed (inner is not silent).
+        assert agent._outputs == ["inner message"]
+
+    @pytest.mark.asyncio
+    async def test_silence_fully_restored_after_silent_step_returns(
+        self, transpile, tmp_path
+    ):
+        # A silent step's silence must not leak past its own return —
+        # a later, unrelated non-silent step call on the same agent
+        # instance must show its output normally.
+        src = (
+            "agent A { "
+            "  silent step outer() -> string { "
+            "    respond \"outer message\" "
+            "    return \"done\" "
+            "  } "
+            "  step after_outer() -> string { "
+            "    respond \"after outer\" "
+            "    return \"ok\" "
+            "  } "
+            "}"
+        )
+        mod = _load(transpile, src, "silent_restore_mod", tmp_path)
+        agent = mod.A()
+        await agent.outer()
+        assert agent._outputs == []
+        await agent.after_outer()
+        assert agent._outputs == ["after outer"]
+
 
 class TestManualStep:
     @pytest.mark.asyncio
