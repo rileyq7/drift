@@ -1,0 +1,71 @@
+-- support_escalation.drift — customer message escalation router
+--
+-- Classifies an inbound support message's urgency with a custom intent
+-- verb, routes via pattern matching, retries on rate limits, and tracks
+-- how many times this agent instance has escalated during the run.
+-- Critical messages get a direct cross-agent notification call.
+config {
+  name: "Support Escalation Router"
+  version: "0.1.0"
+}
+
+schema Urgency {
+  level: one of "low", "medium", "high", "critical"
+  reason: string
+}
+
+define verb triage_urgency {
+  prompt: "You are a support triage specialist. Assess how urgently this customer message needs a human response."
+  output: Urgency
+  temperature: 0.1
+}
+
+agent Notifier {
+  model: "claude-haiku"
+  budget: $0.02 per run
+  step alert_oncall(message: string, reason: string) -> string {
+    respond "PAGING ONCALL: {reason} — {message}"
+    return "paged"
+  }
+}
+
+agent EscalationRouter {
+  model: prefer "claude-haiku" fallback "gpt-4o-mini"
+  budget: $0.10 per run
+  state {
+    escalation_count: int = 0
+  }
+  step route(message: string) -> string {
+    attempt {
+      let urgency = triage_urgency message as Urgency
+      match urgency.level {
+        "critical" -> {
+          let escalation_count = escalation_count + 1
+          Notifier.alert_oncall(message, urgency.reason)
+          respond "Routed as CRITICAL ({escalation_count} escalations this run)"
+          return "critical"
+        }
+        "high" -> {
+          let escalation_count = escalation_count + 1
+          respond "Routed as HIGH priority: {urgency.reason}"
+          return "high"
+        }
+        "medium" -> {
+          respond "Routed as MEDIUM priority: {urgency.reason}"
+          return "medium"
+        }
+        _ -> {
+          respond "Routed as LOW priority: {urgency.reason}"
+          return "low"
+        }
+      }
+    }
+    recover from {
+      RateLimited -> retry
+      any error -> {
+        respond "Triage failed, defaulting to medium priority for human review"
+        return "medium"
+      }
+    }
+  }
+}
