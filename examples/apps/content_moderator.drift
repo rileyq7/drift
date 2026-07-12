@@ -1,0 +1,50 @@
+-- content_moderator.drift — user-submitted content moderation queue
+--
+-- Rate-limits submissions per user, redacts PII before it ever reaches
+-- the model, checks for banned content, and classifies anything that
+-- passes as safe or needing review — escalating to a stronger model
+-- when confidence is low. Demonstrates the `drift/safety` stdlib module
+-- and a `model {}` block with an `upgrade ... when` rule.
+import { redact_pii, check_content, rate_limit } from "drift/safety"
+config {
+  name: "Content Moderator"
+  version: "0.1.0"
+}
+
+schema ModerationResult {
+  verdict: one of "approved", "needs_review", "rejected"
+  reason: string
+}
+
+agent Moderator {
+  model {
+    default: "claude-haiku"
+    fallback: "gpt-4o-mini"
+    upgrade to "claude-sonnet" when {
+      confidence < 0.7
+    }
+  }
+  budget: $0.10 per run
+  quality: 0.7 minimum confidence
+  step moderate(user_id: string, content: string) -> string {
+    let allowed = rate_limit(user_id, max_per_window: 10, window_seconds: 60.0)
+    if not allowed {
+      fail "rate limit exceeded — try again shortly"
+    }
+    let clean = redact_pii(content)
+    let is_clean = check_content(clean, banned_patterns: ["spam", "scam"])
+    if not is_clean {
+      respond "Rejected: matched a banned pattern"
+      return "rejected"
+    }
+    let result = classify clean as confident<ModerationResult>
+    if result is confident {
+      respond "Moderation verdict: {result.value.verdict} — {result.value.reason}"
+      return result.value.verdict
+    }
+    otherwise {
+      respond "Low confidence — routing {user_id}'s submission to human review"
+      return "needs_review"
+    }
+  }
+}
