@@ -985,27 +985,37 @@ class CodeGenerator:
         self.emit_line(f"async def {step.name}({param_str}){ret_annotation}:")
         self.indent()
 
-        # Step body
-        if not step.body:
-            self.emit_line("pass")
-        else:
-            # Budget pre-check
-            self.emit_line("# Budget pre-check")
-            self.emit_line("self.cost_tracker.pre_check()")
-            self.emit_line("")
+        # A step parameter shadows a same-named state field for the
+        # duration of this step — see _shadowed_names' collection comment
+        # on gen_for_each for the full rationale (same mechanism, pushed
+        # here for step params instead of a loop variable).
+        self._shadowed_names = getattr(self, "_shadowed_names", [])
+        self._shadowed_names.append({p.name for p in step.params})
 
-            for i, stmt in enumerate(step.body):
-                is_last = (i == len(step.body) - 1)
-                # If last statement is an intent expr without explicit return, add one
-                if (is_last and step.return_type and
-                    isinstance(stmt, ast.ExprStmt) and
-                    isinstance(stmt.expr, ast.IntentExpr)):
-                    expr_code = self.gen_expr(stmt.expr)
-                    self.emit_line(f"_result = {expr_code}")
-                    self.emit_line(f"self.checkpoint.save('{step.name}', _result)")
-                    self.emit_line("return _result")
-                else:
-                    self.gen_statement(stmt)
+        # Step body
+        try:
+            if not step.body:
+                self.emit_line("pass")
+            else:
+                # Budget pre-check
+                self.emit_line("# Budget pre-check")
+                self.emit_line("self.cost_tracker.pre_check()")
+                self.emit_line("")
+
+                for i, stmt in enumerate(step.body):
+                    is_last = (i == len(step.body) - 1)
+                    # If last statement is an intent expr without explicit return, add one
+                    if (is_last and step.return_type and
+                        isinstance(stmt, ast.ExprStmt) and
+                        isinstance(stmt.expr, ast.IntentExpr)):
+                        expr_code = self.gen_expr(stmt.expr)
+                        self.emit_line(f"_result = {expr_code}")
+                        self.emit_line(f"self.checkpoint.save('{step.name}', _result)")
+                        self.emit_line("return _result")
+                    else:
+                        self.gen_statement(stmt)
+        finally:
+            self._shadowed_names.pop()
 
         self.dedent()
         self._step_name_stack.pop()
@@ -1045,12 +1055,23 @@ class CodeGenerator:
         target = self._resolve_assignment_target(stmt.name)
         self.emit_line(f"{target} = {expr}")
 
+    def _is_shadowed(self, name: str) -> bool:
+        """True if `name` is bound as a step parameter or for-each loop
+        variable in the current lexical scope — see _shadowed_names'
+        collection comments on gen_step/gen_for_each."""
+        for scope in getattr(self, '_shadowed_names', []):
+            if name in scope:
+                return True
+        return False
+
     def _resolve_assignment_target(self, name: str) -> str:
         """`let x = ...` targets `self.x` when x is a declared state
         field (mutating persistent per-run state), or a fresh local
-        variable otherwise. See _agent_state_names' collection comment."""
+        variable otherwise. See _agent_state_names' collection comment.
+        A step parameter or for-each loop variable of the same name takes
+        precedence (lexical shadowing) — see _is_shadowed."""
         state_names = getattr(self, '_agent_state_names', set())
-        if name in state_names:
+        if name in state_names and not self._is_shadowed(name):
             return f"self.{name}"
         return name
 
@@ -1121,22 +1142,38 @@ class CodeGenerator:
 
     def gen_for_each(self, stmt: ast.ForEachStmt):
         iterable = self.gen_expr(stmt.iterable)
-        if stmt.parallel:
-            self.emit_line(f"# Parallel fan-out (concurrent execution)")
-            self.emit_line(f"async def _task({stmt.var_name}):")
-            self.indent()
-            for s in stmt.body:
-                self.gen_statement(s)
-            self.dedent()
-            self.emit_line(f"await asyncio.gather(*[_task(item) for item in {iterable}])")
-        else:
-            self.emit_line(f"for {stmt.var_name} in {iterable}:")
-            self.indent()
-            for s in stmt.body:
-                self.gen_statement(s)
-            if not stmt.body:
-                self.emit_line("pass")
-            self.dedent()
+        # The loop variable shadows a same-named state field for the
+        # duration of the loop body — `state { count: int = 0 }` followed
+        # by `for each count in items { respond "{count}" }` must read
+        # each ITEM, not the persistent self.count state attribute.
+        # gen_expr's Ident case and _rewrite_state_refs used to rewrite
+        # ANY name matching a declared state field to self.<name> with no
+        # lexical scoping at all, silently shadowing the loop variable
+        # (or a step parameter, see gen_step) the wrong way around instead
+        # of the other way. _shadowed_names is a stack of scopes so nested
+        # for-eaches / a for-each inside a step whose own param shares a
+        # name resolve correctly by innermost-scope-wins.
+        self._shadowed_names = getattr(self, "_shadowed_names", [])
+        self._shadowed_names.append({stmt.var_name})
+        try:
+            if stmt.parallel:
+                self.emit_line(f"# Parallel fan-out (concurrent execution)")
+                self.emit_line(f"async def _task({stmt.var_name}):")
+                self.indent()
+                for s in stmt.body:
+                    self.gen_statement(s)
+                self.dedent()
+                self.emit_line(f"await asyncio.gather(*[_task(item) for item in {iterable}])")
+            else:
+                self.emit_line(f"for {stmt.var_name} in {iterable}:")
+                self.indent()
+                for s in stmt.body:
+                    self.gen_statement(s)
+                if not stmt.body:
+                    self.emit_line("pass")
+                self.dedent()
+        finally:
+            self._shadowed_names.pop()
 
     def gen_attempt(self, stmt: ast.AttemptStmt):
         """attempt { body } recover from { ErrorType -> handler ... }
@@ -1372,8 +1409,15 @@ class CodeGenerator:
             # gen_agent for why a bare local would be wrong (shadows the
             # state attribute; UnboundLocalError on first read-before-
             # local-write, silently-wrong "always starts at the default"
-            # semantics otherwise).
-            if expr.name in getattr(self, '_agent_state_names', set()):
+            # semantics otherwise). But a step parameter or for-each loop
+            # variable of the SAME name must win instead — lexical
+            # shadowing, same as any ordinary scoping rule — see
+            # _is_shadowed. Without this check, `step run(count: string)`
+            # or `for each count in items` silently read/wrote the
+            # persistent state field instead of the real parameter/loop
+            # value, with no error.
+            if (expr.name in getattr(self, '_agent_state_names', set())
+                    and not self._is_shadowed(expr.name)):
                 return f"self.{expr.name}"
             return expr.name
         elif isinstance(expr, ast.StringLit):
@@ -1418,7 +1462,14 @@ class CodeGenerator:
         attribute, the same class of bug gen_let/gen_expr's Ident case fix
         for `let`/bare-expression reads of state fields.
         """
-        state_names = getattr(self, '_agent_state_names', set())
+        # A step parameter or for-each loop variable of the same name
+        # shadows the state field (see _is_shadowed) — must not rewrite
+        # `{count}` to `{self.count}` inside `respond "{count}"` when
+        # `count` is actually the current step's own parameter/loop var.
+        state_names = {
+            n for n in getattr(self, '_agent_state_names', set())
+            if not self._is_shadowed(n)
+        }
         if not state_names:
             return expr_src
         try:
