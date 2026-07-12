@@ -173,6 +173,28 @@ class TestIntentExpressions:
         # documented to work for every clause, not just `considering`).
         assert intent.clauses["to"][0].value == "French"
 
+    def test_single_bare_word_input_is_always_a_variable_reference(self):
+        # Documented, intentional behavior (LLM.md § "Single bare word =
+        # variable, not literal text"): a bare one-word input is ALWAYS an
+        # Ident (variable reference), never a one-word literal description
+        # — this is what makes `recall question for "advice"` (LLM.md's
+        # own memory-aware-agent example) correctly read the `question`
+        # step parameter's value rather than recalling the literal word
+        # "question". Pinning this so a future change can't silently flip
+        # it without a test noticing — flipping it would break every
+        # existing single-identifier-as-input example in this file and in
+        # LLM.md itself.
+        i = self._intent_in("generate summary as string")
+        assert isinstance(i.input_expr, ast.Ident)
+        assert i.input_expr.name == "summary"
+
+    def test_quoted_single_word_input_is_literal_text(self):
+        # The escape hatch for the above: quoting forces literal text even
+        # for a single word.
+        i = self._intent_in('generate "summary" as string')
+        assert isinstance(i.input_expr, ast.StringLit)
+        assert i.input_expr.value == "summary"
+
 
 class TestControlFlow:
     def _body(self, source: str):

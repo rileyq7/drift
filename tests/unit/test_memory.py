@@ -90,6 +90,24 @@ class TestRecallRememberParse:
         assert isinstance(let_stmt.value.description, ast.Ident)
         assert let_stmt.value.description.name == "question"
 
+    def test_bare_key_after_for_is_also_a_variable_reference(self, parse_ast):
+        # Same rule applies on both sides of `for`: `recall tips for
+        # advice` treats bare single-word `tips` AND bare single-word
+        # `advice` as variable references, not literal text — documented
+        # in LLM.md as "Single bare word = variable, not literal text."
+        # Quote either side to mean it literally.
+        d = parse_ast(
+            'agent A { memory { } '
+            'step f(tips: string, advice: string) { '
+            '  let context = recall tips for advice '
+            '} }'
+        ).declarations[0]
+        let_stmt = d.steps[0].body[0]
+        assert isinstance(let_stmt.value.description, ast.Ident)
+        assert let_stmt.value.description.name == "tips"
+        assert isinstance(let_stmt.value.key, ast.Ident)
+        assert let_stmt.value.key.name == "advice"
+
     def test_quoted_description_supports_interpolation(self, parse_ast):
         d = parse_ast(
             'agent A { memory { } '
