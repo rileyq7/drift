@@ -315,6 +315,15 @@ class TestRespond:
         assert 'f"Hi, {name}!"' in out
         assert "self.output(" in out
 
+    def test_doubled_braces_are_literal_not_interpolation(self, transpile):
+        # LLM.md documents `{{`/`}}` as the escape for a literal brace —
+        # pinning the actual behavior here since it was previously
+        # undocumented (the mechanism existed in codegen but no LLM.md
+        # section named it as a supported, intentional escape).
+        src = 'agent A { step s() { respond "set notation: {{1, 2, 3}}" } }'
+        out = transpile(src)
+        assert 'f"set notation: {{1, 2, 3}}"' in out
+
 
 class TestImports:
     def test_runtime_imports_present(self, transpile):

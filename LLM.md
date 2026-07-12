@@ -280,6 +280,8 @@ respond "Including arithmetic: {score * 100}"
 ```
 Prints to the user-visible output. The braces interpolate any expression in scope — bare variables, member access (`result.summary`), method calls (`name.upper()`), arithmetic. Multiple `respond`s accumulate; they're shown in order.
 
+A literal brace character (not interpolation) is written doubled — `{{` for a literal `{`, `}}` for a literal `}` — e.g. `respond "set notation: {{1, 2, 3}}"` prints `set notation: {1, 2, 3}`, not an interpolation attempt. This applies anywhere `{...}` interpolation is recognized (`respond`, string literals generally, REST tool path templates).
+
 ### `if` / `otherwise` / `otherwise if`
 ```drift
 if <condition> {
