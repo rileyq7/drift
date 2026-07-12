@@ -4,6 +4,8 @@ The documented invariant is idempotence: format(format(x)) == format(x).
 String escaping must survive a round trip.
 """
 from drift.formatter import format_source
+from drift.lexer import lex
+from drift.parser import Parser
 
 
 class TestFormatterIdempotence:
@@ -79,4 +81,40 @@ class TestFormatterIdempotence:
         once = format_source(src)
         assert 'confident<Foo>' in once
         assert 'confident < Foo >' not in once
+        assert format_source(once) == once
+
+    def test_import_brace_list_stays_inline_and_reparses(self):
+        # Regression, severe: `import { A, B } from "..."` uses braces for
+        # an inline name list, not a block — but the formatter's brace
+        # handling is unconditional (every `{` opens an indented block,
+        # every `}` closes one and triggers a blank-line-after-close).
+        # Treating import's braces the same way split the single import
+        # statement across three lines with a blank line separating
+        # `from "..."` from the `}` — which doesn't just look wrong, the
+        # result no longer PARSES (`import { X }` and `from "..."` must
+        # be one statement). `drift fmt` on a previously-valid file could
+        # silently turn it into a file `drift check` then rejects.
+        src = 'import { Candidate, Score } from "./schemas.drift"\n'
+        once = format_source(src)
+        assert once == 'import { Candidate, Score } from "./schemas.drift"\n'
+        assert format_source(once) == once
+        Parser(lex(once)).parse()  # must not raise
+
+    def test_import_brace_list_written_multiline_collapses_to_one_line(self):
+        # Even if the user wrote the import list across multiple lines,
+        # the output must still be one valid, reparseable statement — not
+        # literal backslash-n characters leaking into the source (an
+        # earlier version of this fix rendered NEWLINE tokens' raw .value,
+        # which is the 2-char debug string '\n', not an actual newline).
+        src = 'import {\n  A,\n  B\n} from "./x.drift"\n'
+        once = format_source(src)
+        assert '\\n' not in once
+        assert format_source(once) == once
+        program = Parser(lex(once)).parse()
+        assert program.declarations[0].names == ["A", "B"]
+
+    def test_bare_import_without_braces_is_unaffected(self):
+        src = 'import GrantChecker from "./agents/checker.drift"\n'
+        once = format_source(src)
+        assert once == src
         assert format_source(once) == once

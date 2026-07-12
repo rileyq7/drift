@@ -91,6 +91,39 @@ def format_source(source: str) -> str:
             continue
 
         if t.type == TT.LBRACE:
+            # `import { A, B, C } from "..."` uses braces for an inline
+            # name list, not a block — unlike every other `{` in Drift
+            # (agent/schema/pipeline/tool bodies, memory/model blocks,
+            # schema constructors), which always open a real multi-line
+            # block. Treating it the same way splits the single import
+            # statement across lines and inserts a blank-line-after-close,
+            # separating `from "..."` onto its own line — which doesn't
+            # just look wrong, it no longer PARSES (`import { X }` and
+            # `from "..."` must be one statement). Render the whole
+            # `{ ... }` inline instead when the line so far starts with
+            # `import`.
+            if (line_toks and line_toks[0].type == TT.IDENT
+                    and line_toks[0].value == 'import'):
+                depth = 1
+                j = i + 1
+                while j < n and depth > 0:
+                    if tokens[j].type == TT.LBRACE:
+                        depth += 1
+                    elif tokens[j].type == TT.RBRACE:
+                        depth -= 1
+                    j += 1
+                # A NEWLINE token's own .value is the literal 2-char
+                # string '\n' (a human-readable debug marker, e.g. for
+                # `drift lex` output) — never meant to be rendered
+                # directly. Drop NEWLINE/COMMENT tokens from the inline
+                # span; _render_line's normal spacing rules handle the
+                # rest (comma+space, brace+space) correctly on their own.
+                line_toks.extend(
+                    tok for tok in tokens[i:j]
+                    if tok.type not in (TT.NEWLINE, TT.COMMENT)
+                )
+                i = j
+                continue
             line_toks.append(t)
             flush()
             indent += 1
