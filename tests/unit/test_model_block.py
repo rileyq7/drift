@@ -286,13 +286,22 @@ class TestCurrentStepScopingAtRuntime:
         agent = mod.A()
         calls = {"n": 0}
 
-        async def flaky_intent(verb, input_data=None, output_schema=None, **kwargs):
-            calls["n"] += 1
-            if input_data == "first" and calls["n"] == 1:
-                raise ModelUnavailable("down", model="claude-haiku")
-            return f"ok:{input_data}"
+        # Patch one layer deeper than agent.intent itself: ModelUnavailable
+        # retry now happens INSIDE intent() (see intent()'s docstring), so
+        # replacing agent.intent wholesale would bypass that retry loop
+        # entirely instead of exercising it. Patching the provider lets
+        # the real intent()/mark_unavailable/retry path run for real,
+        # which is what actually sets the unavailability mark this test
+        # is checking survives a nested step call.
+        class FlakyProvider:
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise ModelUnavailable("down", model="claude-haiku")
+                return ('"ok"', 10, 5)
 
-        agent.intent = flaky_intent
+        agent._provider_for = lambda model_name: FlakyProvider()
 
         seen_inside_inner = {}
         orig_inner = agent.inner

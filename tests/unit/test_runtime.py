@@ -300,20 +300,24 @@ class TestStepDecoratorRetry:
         assert agent.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_falls_back_on_model_unavailable(self):
+    async def test_model_unavailable_escaping_the_step_is_wrapped_once_not_retried(self):
+        # ModelUnavailable/RateLimited retry now happens INSIDE intent()
+        # itself, scoped to the individual failing call — see
+        # TestIntentRetryScopedToCall below for that behavior. A step
+        # function is only called ONCE by step_decorator; if one of these
+        # escapes all the way out of the step body (intent() already
+        # exhausted its own retries), the step wraps it in StepFailed on
+        # the first occurrence rather than re-running the whole step body.
         agent = StubAgent()
 
         @step_decorator()
         async def step(self):
             self.call_count += 1
-            if self.call_count < 2:
-                raise ModelUnavailable("m1 down", model="m1")
-            return "ok"
+            raise ModelUnavailable("m1 down", model="m1")
 
-        result = await step(agent)
-        assert result == "ok"
-        # After the first failure, m1 should be marked unavailable
-        assert "m1" in agent.model._unavailable
+        with pytest.raises(StepFailed):
+            await step(agent)
+        assert agent.call_count == 1
 
     @pytest.mark.asyncio
     async def test_auth_error_does_not_retry(self):
@@ -342,19 +346,20 @@ class TestStepDecoratorRetry:
         assert agent.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_rate_limit_waits_and_retries(self):
+    async def test_rate_limited_escaping_the_step_is_wrapped_once_not_retried(self):
+        # Same reasoning as test_model_unavailable_escaping_the_step_is_
+        # wrapped_once_not_retried above — RateLimited's retry-and-wait
+        # loop now lives inside intent(), not step_decorator.
         agent = StubAgent()
 
         @step_decorator()
         async def step(self):
             self.call_count += 1
-            if self.call_count < 2:
-                raise RateLimited("slow down", model="m1", retry_after=0.01)
-            return "ok"
+            raise RateLimited("slow down", model="m1", retry_after=0.01)
 
-        result = await step(agent)
-        assert result == "ok"
-        assert agent.call_count == 2
+        with pytest.raises(StepFailed):
+            await step(agent)
+        assert agent.call_count == 1
 
     @pytest.mark.asyncio
     async def test_availability_resets_at_step_start(self):
@@ -369,6 +374,152 @@ class TestStepDecoratorRetry:
         await step(agent)
         # The decorator should have reset before invoking the body
         assert "m1" not in agent.model._unavailable
+
+
+# ─── intent() retry — scoped to the individual call, not the step ────
+
+class TestIntentRetryScopedToCall:
+    """The core fix: SchemaViolation/ModelUnavailable/RateLimited retry
+    now happens INSIDE intent(), around just the single failing LLM call
+    — not in step_decorator, wrapping the entire step body. Previously, a
+    step with two intent calls where only the SECOND failed re-ran the
+    WHOLE step from the top on each retry, re-invoking (and, against a
+    real provider, re-billing) the FIRST call up to max_retries times
+    even though it had already succeeded and never needed retrying.
+    """
+
+    @pytest.mark.asyncio
+    async def test_earlier_successful_intent_call_is_not_repeated_when_a_later_one_retries(
+        self, transpile, tmp_path
+    ):
+        src = (
+            'agent A { model: "claude-haiku" '
+            '  step two_calls() -> string { '
+            '    let first = summarize "a" as string '
+            '    let second = classify "b" as string '
+            '    return second '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_no_rebill.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_no_rebill", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_no_rebill"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+        call_log = []
+
+        class FlakyProvider:
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                call_log.append(prompt)
+                # The SECOND intent call (classify "b") fails its first
+                # attempt, then succeeds. The FIRST call (summarize "a")
+                # must never be re-invoked because of that failure.
+                if "b" in prompt and call_log.count(prompt) == 1:
+                    raise SchemaViolation("bad json")
+                return ('ok', 10, 5)
+
+        agent._provider_for = lambda model_name: FlakyProvider()
+
+        result = await agent.two_calls()
+        assert result == "ok"
+        # "summarize a" appears exactly once — it succeeded on its only
+        # attempt and must not have been re-run when "classify b" retried.
+        summarize_calls = [p for p in call_log if "a" in p and "b" not in p]
+        assert len(summarize_calls) == 1, (
+            f"expected summarize('a') to run exactly once, got {len(summarize_calls)} "
+            f"— the earlier successful call was silently re-invoked when a "
+            f"LATER call in the same step retried"
+        )
+
+    @pytest.mark.asyncio
+    async def test_schema_violation_retries_within_intent_then_succeeds(
+        self, transpile, tmp_path
+    ):
+        src = (
+            'agent A { model: "claude-haiku" '
+            '  step f() -> string { '
+            '    let x = classify "x" as string '
+            '    return x '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_intent_retry.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_intent_retry", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_intent_retry"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+        calls = {"n": 0}
+
+        class FlakyProvider:
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise SchemaViolation("bad json")
+                return ('ok', 10, 5)
+
+        agent._provider_for = lambda model_name: FlakyProvider()
+
+        result = await agent.f()
+        assert result == "ok"
+        assert calls["n"] == 3
+
+    @pytest.mark.asyncio
+    async def test_schema_violation_exhausts_retries_and_raises_raw_type(
+        self, transpile, tmp_path
+    ):
+        # Terminal exhaustion re-raises the RAW SchemaViolation (not
+        # StepFailed) from intent() itself — attempt/recover blocks match
+        # the raw type directly (see gen_attempt), so wrapping it here
+        # would silently break every attempt/recover keyed on it. A step
+        # with NO attempt/recover around the call still ends up seeing
+        # StepFailed — but from step_decorator's own wrap one layer up,
+        # not from intent().
+        src = (
+            'agent A { model: "claude-haiku" '
+            '  step f() -> string { '
+            '    let x = classify "x" as string '
+            '    return x '
+            '  } '
+            '}'
+        )
+        py = transpile(src).replace("Source: <drift_file>", "Source: inline")
+        path = tmp_path / "gen_intent_exhaust.py"
+        path.write_text(py)
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location("gen_intent_exhaust", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["gen_intent_exhaust"] = mod
+        spec.loader.exec_module(mod)
+
+        agent = mod.A()
+
+        class AlwaysFailProvider:
+            async def call(self, model, system, prompt, output_schema=None,
+                            temperature=None):
+                raise SchemaViolation("always bad")
+
+        agent._provider_for = lambda model_name: AlwaysFailProvider()
+
+        # intent() raises the raw type on exhaustion...
+        with pytest.raises(SchemaViolation):
+            await agent.intent(verb="classify", input_data="x", output_schema=str)
+
+        # ...but the step (with no attempt/recover) sees StepFailed, from
+        # step_decorator's own terminal wrap.
+        with pytest.raises(StepFailed):
+            await agent.f()
 
 
 # ─── Exception attributes ───────────────────────────────────────────

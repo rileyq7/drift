@@ -1337,7 +1337,6 @@ def step_decorator(output=None, modifier=""):
         @wraps(func)
         async def wrapper(self, *args, **kwargs):
             step_name = func.__name__
-            max_retries = 3
 
             cache = cache_key = None
             if modifier == "cached":
@@ -1394,6 +1393,27 @@ def step_decorator(output=None, modifier=""):
             self._drift_silent = (modifier == "silent")
 
             try:
+                # The step body itself is called ONCE — intent() already
+                # retries SchemaViolation/ModelUnavailable/RateLimited
+                # internally, scoped to just the individual failing intent
+                # call (see intent()'s docstring). Previously this loop
+                # re-ran the WHOLE step body up to max_retries times for
+                # any of those three exceptions escaping ANYWHERE in the
+                # step, including intent calls that had already succeeded
+                # earlier in the same step — silently re-invoking (and,
+                # against a real provider, re-billing) them.
+                #
+                # The one exception the retry loop below still covers:
+                # the STEP's own return-value validation (`output=`'s
+                # dataclass .validate(), from `between`/`one of`
+                # constraints). That check runs on whatever the step
+                # ultimately returns — which may be transformed after an
+                # intent call, not necessarily its direct, immediate
+                # result — so there's no single narrower call to scope a
+                # retry to; retrying the step is the only option, same as
+                # before this fix, just isolated to ONLY this case instead
+                # of the other three.
+                max_retries = 3
                 last_error = None
                 for attempt in range(max_retries):
                     try:
@@ -1401,10 +1421,6 @@ def step_decorator(output=None, modifier=""):
                         if output and dataclasses.is_dataclass(output) and isinstance(result, output):
                             if hasattr(result, 'validate'):
                                 result.validate()
-                        if modifier == "cached":
-                            cache[cache_key] = result
-                        return result
-
                     except SchemaViolation as e:
                         last_error = e
                         if attempt < max_retries - 1:
@@ -1413,34 +1429,20 @@ def step_decorator(output=None, modifier=""):
                         raise _tag(StepFailed(
                             f"Step '{step_name}' failed after {max_retries} attempts: {e}"
                         ))
-
-                    except ModelUnavailable as e:
-                        last_error = e
-                        self.model.mark_unavailable(getattr(e, 'model', None))
-                        if attempt < max_retries - 1 and self.model.candidates():
-                            next_model = self.model.candidates()[0]
-                            print(f"  ⟳  {getattr(e, 'model', '?')} unavailable, falling back to {next_model}")
-                            continue
-                        raise _tag(StepFailed(
-                            f"Step '{step_name}' failed: no models available ({e})"
-                        ))
-
-                    except RateLimited as e:
-                        last_error = e
-                        if attempt < max_retries - 1:
-                            # Cap the wait: a hostile/misconfigured `retry-after:
-                            # 3600` header shouldn't block the run for an hour.
-                            wait = e.retry_after if e.retry_after else 2 ** attempt
-                            wait = min(wait, 60)
-                            print(f"  ⟳  Rate limited on {e.model}, waiting {wait:.1f}s")
-                            await asyncio.sleep(wait)
-                            continue
-                        raise _tag(StepFailed(
-                            f"Step '{step_name}' failed after {max_retries} rate-limited attempts"
-                        ))
-
+                    except (ModelUnavailable, RateLimited) as e:
+                        # intent() exhausted its own retries for these —
+                        # terminal wrap for a step with no attempt/recover
+                        # around the failing call (a step that DOES wrap
+                        # it catches the raw type directly, via
+                        # gen_attempt's generated except clause, before
+                        # this ever runs).
+                        raise _tag(StepFailed(f"Step '{step_name}' failed: {e}"))
                     except (AuthError, BudgetExceeded) as e:
                         raise _tag(e)
+                    else:
+                        if modifier == "cached":
+                            cache[cache_key] = result
+                        return result
 
                 raise _tag(StepFailed(
                     f"Step '{step_name}' failed after {max_retries} attempts: {last_error}"
@@ -1512,7 +1514,66 @@ class Agent:
 
         This is the core runtime method. Every intent verb in Drift
         (classify, extract, summarize, etc.) becomes a call to this method.
+
+        Retries SchemaViolation/ModelUnavailable/RateLimited up to
+        max_retries — scoped to just THIS call, not the whole step. This
+        used to live in step_decorator, wrapping the entire step body: a
+        step with two intent calls where only the SECOND one failed with
+        SchemaViolation re-ran the WHOLE step from the top on each retry,
+        including the first call, which had already succeeded — silently
+        re-invoking (and, against a real provider, re-billing) it up to
+        max_retries times even though it never needed retrying. LLM.md
+        documents SchemaViolation itself as arriving "after N retries",
+        implying the retries already happened before the exception ever
+        reaches user code — consistent with scoping retry to the call,
+        not the step.
+
+        On final exhaustion, re-raises the RAW exception type (not
+        StepFailed) — `attempt { ... } recover from { SchemaViolation ->
+        ... }` matches the raw type directly (see codegen's gen_attempt),
+        so wrapping it here would silently break every existing
+        attempt/recover block keyed on one of these three types.
+        step_decorator is still the layer that converts an exception
+        escaping a step with NO attempt/recover into StepFailed — it just
+        no longer retries the whole step body to do it.
         """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return await self._intent_once(
+                    verb, input_data, output_schema, **kwargs
+                )
+            except SchemaViolation:
+                if attempt < max_retries - 1:
+                    step_name = getattr(self, "_current_step", None) or "?"
+                    print(f"  ⟳  Schema violation in {step_name}, retrying ({attempt + 1}/{max_retries})")
+                    continue
+                raise
+            except ModelUnavailable as e:
+                self.model.mark_unavailable(getattr(e, 'model', None))
+                if attempt < max_retries - 1 and self.model.candidates():
+                    next_model = self.model.candidates()[0]
+                    print(f"  ⟳  {getattr(e, 'model', '?')} unavailable, falling back to {next_model}")
+                    continue
+                raise
+            except RateLimited as e:
+                if attempt < max_retries - 1:
+                    # Cap the wait: a hostile/misconfigured `retry-after:
+                    # 3600` header shouldn't block the run for an hour.
+                    wait = e.retry_after if e.retry_after else 2 ** attempt
+                    wait = min(wait, 60)
+                    print(f"  ⟳  Rate limited on {e.model}, waiting {wait:.1f}s")
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+        # Unreachable (the loop always returns or raises), but keeps the
+        # method's control flow explicit rather than implicitly falling
+        # off the end.
+        raise AssertionError("unreachable")
+
+    async def _intent_once(self, verb: str, input_data: Any = None,
+                            output_schema=None, **kwargs) -> Any:
+        """A single intent attempt — no retry logic. See intent()."""
         # If a `define verb` registered a default output schema and the call
         # didn't override it (no `as` clause), inherit it.
         if output_schema is None and verb in CUSTOM_VERBS:
