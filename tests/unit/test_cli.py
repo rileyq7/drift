@@ -8,7 +8,10 @@ import argparse
 
 import pytest
 
-from drift.cli import cmd_check, cmd_transpile, cmd_new, cmd_fmt, _run_once
+from drift.cli import (
+    cmd_check, cmd_transpile, cmd_new, cmd_fmt, _run_once,
+    _discover_drift_dependencies,
+)
 
 
 SCHEDULE_PIPELINE = (
@@ -195,3 +198,90 @@ class TestCrossFileImportResolution:
         assert rc2 == 0
         out2 = capsys.readouterr().out
         assert "second" in out2
+
+    def test_dependency_syntax_error_attributed_to_dependency_not_importer(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # Regression: a genuine ParseError in the DEPENDENCY's own source
+        # used to propagate uncaught out of _transpile_drift_dependencies
+        # and get caught by _run_once's generic `except ParseError`
+        # handler, which unconditionally prints using args.file (the
+        # IMPORTER) and the importer's OWN source text — but the
+        # exception's line/col refer to positions in the dependency's
+        # text. Since the two source strings are unrelated, this produced
+        # a caret pointing at a essentially random character in the
+        # wrong file, actively misleading about where the real problem is.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        # Comma-separated schema fields are invalid (fields are newline-
+        # separated) — a real, easy mistake to make.
+        (tmp_path / "schema_dep.drift").write_text(
+            "schema Shared { name: string, extra: string }\n"
+        )
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(self.MAIN_SRC)
+
+        rc = _run_once(_args(str(main_file), input='{"item": {"name": "x"}}'))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "schema_dep.drift" in err
+        assert "main.drift" not in err
+        assert "schema Shared { name: string, extra: string }" in err
+
+
+class TestWatchModeDependencyDiscovery:
+    """Regression: `--watch` mode only polled the main file's mtime — a
+    cross-file `import` dependency changing (a shared schema file, most
+    commonly) triggered no re-run at all, leaving the watcher silently
+    showing stale output until the main file itself was also touched."""
+
+    def test_discovers_direct_dependency(self, tmp_path):
+        (tmp_path / "dep.drift").write_text("schema Shared { name: string }\n")
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(
+            'import { Shared } from "./dep.drift"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f(item: Shared) -> string { return item.name } }'
+        )
+        deps = _discover_drift_dependencies(main_file)
+        assert deps == {(tmp_path / "dep.drift").resolve()}
+
+    def test_discovers_transitive_dependency(self, tmp_path):
+        (tmp_path / "grandchild.drift").write_text("schema Inner { x: string }\n")
+        (tmp_path / "child.drift").write_text(
+            'import { Inner } from "./grandchild.drift"\n'
+            "schema Shared { inner: Inner }\n"
+        )
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(
+            'import { Shared } from "./child.drift"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f(item: Shared) -> string { return "x" } }'
+        )
+        deps = _discover_drift_dependencies(main_file)
+        assert deps == {
+            (tmp_path / "child.drift").resolve(),
+            (tmp_path / "grandchild.drift").resolve(),
+        }
+
+    def test_no_dependencies_returns_empty_set(self, tmp_path):
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(
+            'agent A { model: "claude-haiku" step f() -> string { return "x" } }'
+        )
+        assert _discover_drift_dependencies(main_file) == set()
+
+    def test_malformed_dependency_does_not_crash_discovery(self, tmp_path):
+        # Discovery is used inside the --watch polling loop, which must
+        # keep running even if a dependency is mid-edit and momentarily
+        # has a syntax error — the next _run_once call surfaces that
+        # properly; discovery itself should just return what it found
+        # before the error rather than raising.
+        (tmp_path / "dep.drift").write_text("schema Shared { name: string, }\n")
+        main_file = tmp_path / "main.drift"
+        main_file.write_text(
+            'import { Shared } from "./dep.drift"\n'
+            'agent A { model: "claude-haiku" '
+            '  step f(item: Shared) -> string { return item.name } }'
+        )
+        deps = _discover_drift_dependencies(main_file)
+        assert isinstance(deps, set)  # no exception raised

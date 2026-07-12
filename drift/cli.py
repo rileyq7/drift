@@ -286,6 +286,50 @@ def cmd_transpile(args):
         sys.exit(1)
 
 
+class _DependencyError(Exception):
+    """Raised when a cross-file `.drift` dependency itself fails to lex/
+    parse/codegen. The error has already been printed (correctly
+    attributed to the dependency's own file/source) by the raise site in
+    _transpile_drift_dependencies — this just signals _run_once's caller
+    to stop and report failure without re-printing anything, since the
+    real LexError/ParseError/CodegenError line/col refer to the
+    dependency's source, not the importer's (which _run_once's own
+    generic handlers would otherwise incorrectly assume)."""
+    def __init__(self, dep_path: Path):
+        self.dep_path = dep_path
+        super().__init__(f"dependency {dep_path} failed to compile")
+
+
+def _discover_drift_dependencies(drift_file: Path, seen: set = None) -> set:
+    """Lightweight, side-effect-free version of _transpile_drift_dependencies'
+    traversal — lex+parse only, no codegen/writing .py files. Used by
+    `--watch` mode to know which files' mtimes to poll: the watch loop
+    only checked the main file's mtime, so editing a cross-file `import`
+    dependency (a shared schema file, say) triggered no re-run at all —
+    the watcher would sit there showing stale output until the main file
+    itself was also touched. Malformed dependency source is swallowed
+    (returns what was found before the error) since a lex/parse failure
+    here shouldn't crash the watch loop — the next _run_once call will
+    surface it properly as a real error.
+    """
+    if seen is None:
+        seen = set()
+    base_dir = drift_file.resolve().parent
+    try:
+        program = Parser(lex(drift_file.read_text())).parse()
+    except Exception:
+        return seen
+    for decl in program.declarations:
+        if not (isinstance(decl, ImportDecl) and decl.source_path.endswith(".drift")):
+            continue
+        dep_path = (base_dir / decl.source_path).resolve()
+        if dep_path in seen or not dep_path.exists():
+            continue
+        seen.add(dep_path)
+        _discover_drift_dependencies(dep_path, seen)
+    return seen
+
+
 def _transpile_drift_dependencies(program, drift_file: Path, seen: set) -> set:
     """Recursively transpile `.drift` files referenced via `import { X }
     from "./other.drift"` so their sibling .py exists before the importer
@@ -321,16 +365,37 @@ def _transpile_drift_dependencies(program, drift_file: Path, seen: set) -> set:
         seen.add(dep_path)
         dirs.add(dep_path.parent)
         dep_source = dep_path.read_text()
-        dep_tokens = lex(dep_source)
-        dep_program = Parser(dep_tokens).parse()
+        # A lex/parse/codegen error HERE is in the DEPENDENCY's source,
+        # not the importer's — letting it propagate uncaught would hit
+        # _run_once's own except LexError/ParseError/CodegenError blocks,
+        # which unconditionally print using args.file (the importer) and
+        # the IMPORTER's source text, while the exception's line/col
+        # refer to positions in the DEPENDENCY's text. That produces a
+        # genuinely misleading error: the importer's path and content
+        # with a caret pointing at unrelated characters, since the two
+        # source strings have nothing to do with each other. Catch and
+        # print with the correct (dependency) file/source right here.
+        try:
+            dep_tokens = lex(dep_source)
+            dep_program = Parser(dep_tokens).parse()
+        except LexError as e:
+            _print_lex_error(str(dep_path), dep_source, e)
+            raise _DependencyError(dep_path) from e
+        except ParseError as e:
+            _print_parse_error(str(dep_path), dep_source, e)
+            raise _DependencyError(dep_path) from e
         # Recurse first so transitive dependencies exist before this one
         # is written (matters if this file's own codegen were ever made
         # dependency-aware; harmless no-op today since gen_import doesn't
         # validate against the target's actual exports).
         dirs |= _transpile_drift_dependencies(dep_program, dep_path, seen)
-        dep_python = CodeGenerator().generate(dep_program).replace(
-            "Source: <drift_file>", f"Source: {dep_path}"
-        )
+        try:
+            dep_python = CodeGenerator().generate(dep_program).replace(
+                "Source: <drift_file>", f"Source: {dep_path}"
+            )
+        except CodegenError as e:
+            print(f"  ✗ {dep_path} — {e}")
+            raise _DependencyError(dep_path) from e
         dep_py_path = dep_path.with_suffix('.py')
         dep_py_path.write_text(dep_python)
         print(f"  ✓ Transpiled dependency → {dep_py_path}")
@@ -453,6 +518,15 @@ def _run_once(args):
         asyncio.run(run_agent(agent_cls, step_name=args.step, inputs=inputs))
         return 0
 
+    except _DependencyError:
+        # Already printed with the correct (dependency) file/source by
+        # the raise site — must be caught before the generic handlers
+        # below, which would otherwise mis-attribute it to args.file
+        # (the importer) using the IMPORTER's source text while the
+        # underlying LexError/ParseError's line/col refer to the
+        # dependency's text, producing a caret pointing at unrelated
+        # characters in the wrong file.
+        return 1
     except LexError as e:
         _print_lex_error(args.file, source, e)
         return 1
@@ -483,19 +557,29 @@ def cmd_run(args):
         rc = _run_once(args)
         sys.exit(rc)
 
-    # Watch mode: poll mtime, re-run on change.
+    # Watch mode: poll mtime, re-run on change. Watches the main file AND
+    # every `.drift` file it (transitively) imports — watching only the
+    # main file meant editing a shared/imported schema triggered no
+    # re-run at all, so the watcher would keep showing stale output
+    # until the main file itself was also touched. Re-discovers the
+    # dependency set after every re-run so adding/removing an `import`
+    # (or a dependency's own dependency changing) is picked up too.
     path = Path(args.file)
-    last_mtime = 0.0
+    watched_mtimes: dict = {}
     print(f"  ▸ watching {args.file} — Ctrl-C to exit")
     try:
         while True:
-            try:
-                mtime = path.stat().st_mtime
-            except FileNotFoundError:
-                time.sleep(0.5)
-                continue
-            if mtime != last_mtime:
-                last_mtime = mtime
+            watched_paths = {path} | _discover_drift_dependencies(path)
+            changed = False
+            for p in watched_paths:
+                try:
+                    mtime = p.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if watched_mtimes.get(p) != mtime:
+                    changed = True
+                watched_mtimes[p] = mtime
+            if changed:
                 print("\n" + "─" * 50)
                 _run_once(args)
             time.sleep(0.5)
