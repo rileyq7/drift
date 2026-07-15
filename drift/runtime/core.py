@@ -1461,6 +1461,17 @@ def step_decorator(output=None, modifier=""):
                         raise _tag(StepFailed(f"Step '{step_name}' failed: {e}"))
                     except (AuthError, BudgetExceeded) as e:
                         raise _tag(e)
+                    except StepFailed as e:
+                        # `fail "..."` codegens directly to `raise
+                        # StepFailed(...)` inside the step body — unlike
+                        # the StepFailed instances raised elsewhere in this
+                        # loop (schema-retry exhaustion, wrapped
+                        # ModelUnavailable/RateLimited), this one reaches
+                        # here untagged, so agent/step were silently null
+                        # in every consumer that reads _drift_agent/
+                        # _drift_step (build_run_outcome, the CLI's
+                        # _print_runtime_error, MCP's drift_run).
+                        raise _tag(e)
                     else:
                         if modifier == "cached":
                             cache[cache_key] = result
@@ -1823,6 +1834,74 @@ def first_declared(classes) -> type:
         return getattr(code, 'co_firstlineno', 1 << 30)
 
     return min(classes, key=_lineno)
+
+
+def build_run_outcome(*, result: Any = None, error: Exception = None,
+                       cost: dict = None) -> dict:
+    """Shape a run's result (success or failure) into the one JSON-safe
+    envelope both `drift run --json` and the MCP `drift_run`/`drift_check`
+    family return, so the two surfaces can't drift apart the way they did
+    before this existed (MCP had {ok, result, cost, outputs} /
+    {ok, stage, kind, error, cost, outputs}; the CLI had no structured
+    output at all). `cost` is the `cost_out`/`_drift_cost` snapshot dict
+    (`total_cost`, `budget`, `currency`, `calls`, `outputs`) already
+    produced by `run_agent` — this only reshapes it, it doesn't compute it.
+
+    On success (`error` is None): {ok: true, result, cost, outputs}.
+    On failure: {ok: false, stage: "run", kind, error, cost, outputs},
+    where `kind` mirrors mcp_server._run's existing classification —
+    budget/auth/business-logic/bug — so a caller can tell "your program
+    has a bug" apart from "the run failed for a reason your program
+    already handles".
+    """
+    cost = dict(cost) if cost else {}
+    outputs = cost.pop('outputs', [])
+    cost_snapshot = cost or None
+
+    if error is None:
+        return {
+            "ok": True,
+            "result": _to_jsonable(result),
+            "cost": cost_snapshot,
+            "outputs": outputs,
+        }
+
+    if isinstance(error, BudgetExceeded):
+        kind = "budget"
+    elif isinstance(error, AuthError):
+        kind = "auth"
+    elif isinstance(error, StepFailed):
+        kind = "business-logic"
+    else:
+        kind = "bug"
+
+    return {
+        "ok": False,
+        "stage": "run",
+        "kind": kind,
+        "error": f"{type(error).__name__}: {error}",
+        "agent": getattr(error, '_drift_agent', None),
+        "step": getattr(error, '_drift_step', None),
+        "cost": cost_snapshot,
+        "outputs": outputs,
+    }
+
+
+def _to_jsonable(obj: Any) -> Any:
+    """Convert a step's return value into JSON-safe data — dataclasses to
+    dicts (recursively), primitives as-is, anything else via repr(). Shared
+    by build_run_outcome and the MCP server (which keeps its own copy in
+    sync via re-export below to avoid a behavior split between the two
+    surfaces)."""
+    if dataclasses.is_dataclass(obj):
+        return {f.name: _to_jsonable(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return repr(obj)
 
 
 async def run_agent(agent_class: type, step_name: str = None,

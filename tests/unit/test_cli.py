@@ -5,11 +5,13 @@ each should report a CodegenError the same clean way, not leak a raw
 Python traceback or misreport a compile-time rejection as a runtime error.
 """
 import argparse
+import io
+import json
 
 import pytest
 
 from drift.cli import (
-    cmd_check, cmd_transpile, cmd_new, cmd_fmt, _run_once,
+    cmd_check, cmd_transpile, cmd_new, cmd_fmt, cmd_schema, _run_once,
     _discover_drift_dependencies,
 )
 
@@ -25,7 +27,7 @@ SCHEDULE_PIPELINE = (
 def _args(file, **overrides):
     ns = argparse.Namespace(file=file, output=None, step=None, agent=None,
                              pipeline=None, input=None, trace=False, watch=False,
-                             check=False, stdout=False)
+                             check=False, stdout=False, json=False, name=None)
     for k, v in overrides.items():
         setattr(ns, k, v)
     return ns
@@ -310,3 +312,138 @@ class TestWatchModeDependencyDiscovery:
         )
         deps = _discover_drift_dependencies(main_file)
         assert isinstance(deps, set)  # no exception raised
+
+
+TWO_SCHEMA_SRC = (
+    'schema Grant {\n'
+    '  amount: number between 0 and 1000000\n'
+    '  status: one of "pending", "approved", "denied"\n'
+    '}\n'
+    'schema Result {\n'
+    '  ok: bool\n'
+    '}\n'
+    'agent Checker {\n'
+    '  step check(g: Grant) -> Result { respond Result { ok: true } }\n'
+    '}\n'
+)
+
+
+class TestSchemaCommand:
+    """`drift schema` renders a program's schema block(s) as JSON Schema —
+    free (no agent run, no budget spent), for a caller (e.g. a tool
+    registry) that needs a schema's shape without executing anything."""
+
+    def test_no_name_prints_all_schemas(self, tmp_path, capsys):
+        f = tmp_path / "s.drift"
+        f.write_text(TWO_SCHEMA_SRC)
+        cmd_schema(_args(str(f)))
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert list(payload.keys()) == ["Grant", "Result"]
+        assert payload["Result"] == {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        }
+
+    def test_name_prints_single_schema(self, tmp_path, capsys):
+        f = tmp_path / "s.drift"
+        f.write_text(TWO_SCHEMA_SRC)
+        cmd_schema(_args(str(f), name="Result"))
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert payload == {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        }
+
+    def test_unknown_name_exits_nonzero_with_actionable_message(self, tmp_path, capsys):
+        f = tmp_path / "s.drift"
+        f.write_text(TWO_SCHEMA_SRC)
+        with pytest.raises(SystemExit):
+            cmd_schema(_args(str(f), name="DoesNotExist"))
+        err = capsys.readouterr().err
+        assert "not found" in err
+        assert "Grant" in err and "Result" in err
+
+    def test_no_schemas_in_program_exits_nonzero(self, tmp_path, capsys):
+        f = tmp_path / "s.drift"
+        f.write_text('agent A { step f() -> string { return "x" } }')
+        with pytest.raises(SystemExit):
+            cmd_schema(_args(str(f)))
+        err = capsys.readouterr().err
+        assert "No schemas" in err
+
+
+class TestRunJsonMode:
+    """`drift run --json` emits one machine-readable result object instead
+    of the human banner/box-drawing output, for a caller (e.g. a sandboxed
+    execution wrapper) that has no human reading the terminal."""
+
+    SRC = (
+        'schema Result { ok: bool }\n'
+        'agent Checker {\n'
+        '  step check(g: string) -> Result { respond Result { ok: true } }\n'
+        '}\n'
+    )
+
+    def test_json_mode_prints_exactly_one_json_object(self, tmp_path, capsys):
+        f = tmp_path / "p.drift"
+        f.write_text(self.SRC)
+        rc = _run_once(_args(str(f), json=True, input='{"g": "hi"}'))
+        assert rc == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)  # raises if anything but one JSON object was printed
+        assert payload["ok"] is True
+        assert "cost" in payload and "outputs" in payload
+
+    def test_json_mode_reads_input_from_stdin(self, tmp_path, capsys, monkeypatch):
+        f = tmp_path / "p.drift"
+        f.write_text(self.SRC)
+        monkeypatch.setattr("sys.stdin", io.StringIO('{"g": "hi"}'))
+        rc = _run_once(_args(str(f), json=True, input='-'))
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is True
+
+    def test_json_mode_reports_agent_and_step_on_failure(self, tmp_path, capsys):
+        f = tmp_path / "fail.drift"
+        f.write_text('agent Failer { step go() { fail "broken" } }')
+        rc = _run_once(_args(str(f), json=True))
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["stage"] == "run"
+        assert payload["kind"] == "business-logic"
+        assert payload["agent"] == "Failer"
+        assert payload["step"] == "go"
+
+    def test_json_mode_reports_compile_error_with_stage(self, tmp_path, capsys):
+        f = tmp_path / "bad.drift"
+        f.write_text(SCHEDULE_PIPELINE)
+        rc = _run_once(_args(str(f), json=True))
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["stage"] == "codegen"
+
+    def test_json_mode_reports_invalid_input_json(self, tmp_path, capsys):
+        f = tmp_path / "p.drift"
+        f.write_text(self.SRC)
+        rc = _run_once(_args(str(f), json=True, input='not json'))
+        assert rc == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["stage"] == "input"
+
+    def test_json_mode_prints_no_banner_or_box_drawing(self, tmp_path, capsys):
+        f = tmp_path / "p.drift"
+        f.write_text(self.SRC)
+        _run_once(_args(str(f), json=True, input='{"g": "hi"}'))
+        out = capsys.readouterr().out
+        assert out.count("{") == out.count("}")  # one JSON object, nothing else
+        assert "═" not in out
+        assert "Transpiled" not in out

@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from drift.mcp_server import _run, _check, _transpile, _transpile_result
+from drift.mcp_server import _run, _check, _transpile, _transpile_result, _schema_result
 
 
 HELLO = (
@@ -176,6 +176,55 @@ class TestDriftRun:
         assert result["outputs"] == ["trying..."]
         assert "banner" not in result
 
+    @pytest.mark.asyncio
+    async def test_agent_param_selects_named_agent_over_first_declared(
+        self, monkeypatch
+    ):
+        # Regression: drift_run had no way to target a specific agent by
+        # name — only the CLI's --agent flag could. A program with more
+        # than one agent was only ever addressable via its first-declared
+        # one through MCP.
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(ORDER_SRC, "{}", agent="Alpha")
+        assert result["ok"] is True
+        assert result["result"] == "Hello from Alpha"
+
+    @pytest.mark.asyncio
+    async def test_unknown_agent_param_gives_actionable_error(self, monkeypatch):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        result = await _run(ORDER_SRC, "{}", agent="DoesNotExist")
+        assert result["ok"] is False
+        assert result["stage"] == "discover"
+        assert "not found" in result["error"]
+        assert "Zeta" in result["error"] and "Alpha" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_step_param_selects_named_step(self, monkeypatch):
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        source = (
+            'agent Multi { '
+            '  step first() -> string { return "first" } '
+            '  step second() -> string { return "second" } '
+            '}'
+        )
+        result = await _run(source, "{}", step="second")
+        assert result["ok"] is True
+        assert result["result"] == "second"
+
+    @pytest.mark.asyncio
+    async def test_run_failure_includes_agent_and_step_fields(self, monkeypatch):
+        # build_run_outcome tags failures with `agent`/`step` (from
+        # step_decorator's _drift_agent/_drift_step) — a `fail "..."`
+        # statement raises StepFailed directly from generated code, which
+        # used to bypass that tagging entirely (see step_decorator's
+        # `except StepFailed` clause).
+        monkeypatch.setenv("DRIFT_USE_MOCK", "1")
+        source = 'agent Failer { step go() { fail "deliberately broken" } }'
+        result = await _run(source, "{}")
+        assert result["ok"] is False
+        assert result["agent"] == "Failer"
+        assert result["step"] == "go"
+
 
 PIPELINE_SRC = (
     'agent Triager { step classify(x: string) -> string { return "urgent" } } '
@@ -312,3 +361,72 @@ class TestCheckAndTranspile:
         assert check_result["ok"] is False
         assert transpile_result["ok"] is False
         assert check_result["error"] == transpile_result["error"]
+
+
+TWO_SCHEMA_SRC = (
+    'schema Grant {\n'
+    '  amount: number between 0 and 1000000\n'
+    '  status: one of "pending", "approved", "denied"\n'
+    '}\n'
+    'schema Result {\n'
+    '  ok: bool\n'
+    '}\n'
+    'agent Checker {\n'
+    '  step check(g: Grant) -> Result { respond Result { ok: true } }\n'
+    '}\n'
+)
+
+
+class TestDriftSchema:
+    """`drift_schema` renders a program's `schema` block(s) to JSON Schema
+    without running an agent — no LLM calls, no budget spent. Previously
+    the only way to see a schema's shape was to transpile + exec + run an
+    agent and inspect its inputs/outputs, or hand-parse generated Python."""
+
+    def test_no_name_returns_all_schemas_in_source_order(self):
+        result = _schema_result(TWO_SCHEMA_SRC)
+        assert result["ok"] is True
+        assert list(result["schemas"].keys()) == ["Grant", "Result"]
+        assert result["schemas"]["Grant"] == {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "status": {"type": "string", "enum": ["pending", "approved", "denied"]},
+            },
+            "required": ["amount", "status"],
+            "additionalProperties": False,
+        }
+
+    def test_name_returns_single_schema(self):
+        result = _schema_result(TWO_SCHEMA_SRC, name="Result")
+        assert result["ok"] is True
+        assert result["schema"] == {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        }
+        assert "schemas" not in result
+
+    def test_unknown_name_gives_actionable_error(self):
+        result = _schema_result(TWO_SCHEMA_SRC, name="DoesNotExist")
+        assert result["ok"] is False
+        assert result["stage"] == "discover"
+        assert "not found" in result["error"]
+        assert "Grant" in result["error"] and "Result" in result["error"]
+
+    def test_no_schemas_in_program_gives_actionable_error(self):
+        result = _schema_result(HELLO)
+        assert result["ok"] is False
+        assert result["stage"] == "discover"
+        assert "No schemas" in result["error"]
+
+    def test_lex_error_reports_lex_stage(self):
+        result = _schema_result('schema Broken { field: "unterminated }')
+        assert result["ok"] is False
+        assert result["stage"] == "lex"
+
+    def test_parse_error_reports_parse_stage(self):
+        result = _schema_result('schema Broken { field }')
+        assert result["ok"] is False
+        assert result["stage"] == "parse"

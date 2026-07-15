@@ -787,6 +787,99 @@ class TestRunAgentCostOut:
         assert cost["total_cost"] == 0.02
         assert exc_info.value._drift_cost["total_cost"] == 0.02
 
+    @pytest.mark.asyncio
+    async def test_step_failed_raised_directly_is_tagged_with_agent_and_step(self):
+        # Regression: a StepFailed raised directly from a step body (as
+        # `fail "..."` codegens to) used to bypass step_decorator's _tag()
+        # entirely — only StepFailed instances step_decorator itself
+        # constructed (schema-retry exhaustion, wrapped ModelUnavailable/
+        # RateLimited) got _drift_agent/_drift_step set. Any consumer
+        # reading those attributes (build_run_outcome, the CLI's
+        # _print_runtime_error, MCP's drift_run) silently got None/None
+        # for this — plausibly the most common failure shape in practice.
+        class Fails(Agent):
+            def __init__(self):
+                super().__init__(name="Fails", budget=Budget(max_per_run=1.0))
+
+            @step_decorator()
+            async def go(self):
+                raise StepFailed("deliberately broken")
+
+        with pytest.raises(StepFailed) as exc_info:
+            await run_agent(Fails)
+
+        assert exc_info.value._drift_agent == "Fails"
+        assert exc_info.value._drift_step == "go"
+
+
+# ─── build_run_outcome — shared CLI/MCP result shape ──────────────────
+
+class TestBuildRunOutcome:
+    """One shape both `drift run --json` and the MCP `drift_run` tool
+    build their return value from — see build_run_outcome's docstring for
+    why this needed to be a single shared function rather than two
+    independently-hand-rolled dicts."""
+
+    def test_success_shape(self):
+        from drift.runtime.core import build_run_outcome
+        cost = {"total_cost": 0.1, "budget": 1.0, "currency": "USD",
+                 "calls": [], "outputs": ["hi"]}
+        outcome = build_run_outcome(result="done", cost=cost)
+        assert outcome == {
+            "ok": True,
+            "result": "done",
+            "cost": {"total_cost": 0.1, "budget": 1.0, "currency": "USD", "calls": []},
+            "outputs": ["hi"],
+        }
+
+    def test_success_shape_converts_dataclass_result(self):
+        from drift.runtime.core import build_run_outcome
+
+        @dataclass
+        class Result:
+            ok: bool
+
+        outcome = build_run_outcome(result=Result(ok=True), cost=None)
+        assert outcome["result"] == {"ok": True}
+        assert outcome["cost"] is None
+        assert outcome["outputs"] == []
+
+    def test_failure_shape_classifies_budget_exceeded(self):
+        from drift.runtime.core import build_run_outcome
+        e = BudgetExceeded("over budget")
+        e._drift_agent = "Checker"
+        e._drift_step = "check"
+        outcome = build_run_outcome(error=e, cost={"total_cost": 0.5, "outputs": []})
+        assert outcome["ok"] is False
+        assert outcome["stage"] == "run"
+        assert outcome["kind"] == "budget"
+        assert outcome["agent"] == "Checker"
+        assert outcome["step"] == "check"
+        assert outcome["cost"] == {"total_cost": 0.5}
+
+    def test_failure_shape_classifies_auth_error(self):
+        from drift.runtime.core import build_run_outcome
+        outcome = build_run_outcome(error=AuthError("bad key"))
+        assert outcome["kind"] == "auth"
+
+    def test_failure_shape_classifies_step_failed_as_business_logic(self):
+        from drift.runtime.core import build_run_outcome
+        outcome = build_run_outcome(error=StepFailed("nope"))
+        assert outcome["kind"] == "business-logic"
+
+    def test_failure_shape_classifies_unknown_exception_as_bug(self):
+        from drift.runtime.core import build_run_outcome
+        outcome = build_run_outcome(error=ValueError("unexpected"))
+        assert outcome["kind"] == "bug"
+        assert outcome["agent"] is None
+        assert outcome["step"] is None
+
+    def test_failure_shape_with_no_cost_omits_cost_dict(self):
+        from drift.runtime.core import build_run_outcome
+        outcome = build_run_outcome(error=StepFailed("nope"), cost=None)
+        assert outcome["cost"] is None
+        assert outcome["outputs"] == []
+
 
 # ─── gather_or_cancel — orphaned-task cleanup on partial failure ──────
 

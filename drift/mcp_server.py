@@ -2,11 +2,12 @@
 Drift MCP server — exposes Drift's transpile/check/run via the Model Context Protocol.
 
 Other coding agents (Claude Code, Cursor, anything MCP-aware) can register this
-server and gain three tools:
+server and gain four tools:
 
   - drift_check(source)   → "OK" or parse-error message
   - drift_transpile(source) → generated Python
-  - drift_run(source, input=None, pipeline=None) → cost-tracked run, returns result + cost
+  - drift_schema(source, name=None) → JSON Schema for the program's schema block(s)
+  - drift_run(source, input=None, pipeline=None, agent=None, step=None) → cost-tracked run, returns result + cost
 
 Launch with `drift mcp` (stdio). Wire it into Claude Code via .mcp.json:
 
@@ -32,7 +33,7 @@ from typing import Any
 from drift.lexer import lex, LexError
 from drift.parser import Parser, ParseError
 from drift.codegen import CodeGenerator, CodegenError
-from drift.runtime.core import BudgetExceeded, StepFailed, AuthError
+from drift.runtime.core import build_run_outcome, _to_jsonable
 
 
 def _transpile(source: str) -> str:
@@ -82,18 +83,95 @@ def _check(source: str) -> dict:
     return {"ok": True}
 
 
-def _split_cost_and_outputs(snapshot: dict | None) -> tuple[dict | None, list]:
-    """run_agent's cost_out bundles cost numbers and `respond`-statement
-    output into one dict (see run_agent's docstring) — split them into the
-    two separate top-level response fields drift_run actually returns."""
-    if not snapshot:
-        return snapshot, []
-    outputs = snapshot.pop('outputs', [])
-    return snapshot, outputs
+def _schema_result(source: str, name: str | None = None) -> dict:
+    """The drift_schema tool's logic (and `drift schema`'s underlying
+    implementation) — standalone so it's unit-testable without spinning up
+    the stdio server, same pattern as _check/_transpile_result.
+
+    Transpiles `source`, execs the generated module, and renders each
+    top-level `schema` block's generated dataclass to JSON Schema via
+    `dataclass_to_json_schema` (drift/runtime/core.py) — the same
+    converter the runtime already uses internally to build provider
+    strict-mode schemas, just exposed here directly instead of requiring
+    a caller to transpile + exec + introspect a module by hand. There was
+    previously no way to get a program's schema shape without running an
+    agent (which spends budget) or hand-parsing the generated Python.
+
+    Without `name`, returns every schema declared in `source` (in source
+    order) as {ok: true, schemas: {name: json_schema, ...}}. With `name`,
+    returns just that one as {ok: true, schema: json_schema}. Schemas
+    aren't "discovered" from a module the way agents/pipelines are (no
+    existing first-declared-wins convention makes sense here — a caller
+    asking for a program's schemas almost always wants all of them, e.g.
+    to build several tool input/output schemas from one shared file), so
+    the default is "all", not "first".
+    """
+    try:
+        python_source = _transpile(source)
+    except LexError as e:
+        return {"ok": False, "stage": "lex", "error": str(e)}
+    except ParseError as e:
+        return {"ok": False, "stage": "parse", "error": str(e)}
+    except CodegenError as e:
+        return {"ok": False, "stage": "codegen", "error": str(e)}
+
+    tokens = lex(source)
+    program = Parser(tokens).parse()
+    codegen = CodeGenerator()
+    codegen.generate(program)
+    schema_names = list(codegen.schemas_declared)
+
+    if not schema_names:
+        return {"ok": False, "stage": "discover", "error": "No schemas in program"}
+
+    if name and name not in schema_names:
+        avail = ', '.join(schema_names)
+        return {
+            "ok": False, "stage": "discover",
+            "error": f"Schema {name!r} not found. Available: {avail}",
+        }
+
+    with tempfile.TemporaryDirectory() as td:
+        py_path = Path(td) / "drift_schema_program.py"
+        py_path.write_text(python_source)
+
+        import importlib.util
+        module_name = "drift_mcp_schema_program"
+        prev_module = sys.modules.get(module_name)
+        spec = importlib.util.spec_from_file_location(module_name, py_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            try:
+                spec.loader.exec_module(module)
+            except Exception as e:
+                return {"ok": False, "stage": "import", "error": f"{type(e).__name__}: {e}"}
+
+            from drift.runtime.core import dataclass_to_json_schema
+            rendered = {}
+            for schema_name in ([name] if name else schema_names):
+                cls = getattr(module, schema_name, None)
+                json_schema = dataclass_to_json_schema(cls) if cls is not None else None
+                if json_schema is None:
+                    return {
+                        "ok": False, "stage": "import",
+                        "error": f"Schema {schema_name!r} did not produce a dataclass",
+                    }
+                rendered[schema_name] = json_schema
+        finally:
+            if prev_module is not None:
+                sys.modules[module_name] = prev_module
+            else:
+                sys.modules.pop(module_name, None)
+
+    if name:
+        return {"ok": True, "schema": rendered[name]}
+    return {"ok": True, "schemas": rendered}
 
 
 async def _run(source: str, input_json: str | None = None,
-                pipeline: str | None = None) -> dict:
+                pipeline: str | None = None, agent: str | None = None,
+                step: str | None = None) -> dict:
     """Transpile + exec a Drift program against the runtime. Returns
     {ok, result?, cost?, outputs?, error?, stage?, kind?} — `cost` is a
     {total_cost, budget, currency, calls} snapshot and `outputs` is the
@@ -113,6 +191,12 @@ async def _run(source: str, input_json: str | None = None,
     pipeline-shaped (list) input was passed, both undocumented gaps
     against LLM.md's own claim that drift_run's only limitation is
     cross-file imports.
+
+    `agent`/`step`, if given, select a specific agent/step by name —
+    mirrors `drift run --agent`/`--step`. Without `agent`, a program with
+    more than one agent used to always silently pick the first-declared
+    one with no way for an MCP caller to target another, unlike the CLI
+    (which already had --agent/--step). Ignored when `pipeline` is given.
 
     Async because it awaits the agent directly: the MCP server calls this from
     an already-running event loop, so `asyncio.run()` here would raise
@@ -243,12 +327,21 @@ async def _run(source: str, input_json: str | None = None,
                     }
                 return {"ok": False, "stage": "discover", "error": "No agents in program"}
 
-            # dir(module) returns names ALPHABETICALLY — next(iter(...))
-            # used to silently run whichever agent's class name sorted
-            # first, not the first one actually declared in the source,
-            # contradicting LLM.md's documented "runs the first agent's
-            # first step". See first_declared's docstring.
-            agent_cls = first_declared(agents.values())
+            if agent:
+                agent_cls = agents.get(agent)
+                if not agent_cls:
+                    avail = ', '.join(agents) if agents else '(none)'
+                    return {
+                        "ok": False, "stage": "discover",
+                        "error": f"Agent {agent!r} not found. Available: {avail}",
+                    }
+            else:
+                # dir(module) returns names ALPHABETICALLY — next(iter(...))
+                # used to silently run whichever agent's class name sorted
+                # first, not the first one actually declared in the source,
+                # contradicting LLM.md's documented "runs the first agent's
+                # first step". See first_declared's docstring.
+                agent_cls = first_declared(agents.values())
             inputs = parsed_input if parsed_input is not None else {}
 
             # Capture stdout so the run banner (box-drawing header, printed
@@ -262,7 +355,7 @@ async def _run(source: str, input_json: str | None = None,
             sys.stdout = buf
             cost: dict = {}
             try:
-                result = await run_agent(agent_cls, inputs=inputs, cost_out=cost)
+                result = await run_agent(agent_cls, step_name=step, inputs=inputs, cost_out=cost)
             except Exception as e:
                 sys.stdout = old_out
                 # BudgetExceeded/StepFailed/AuthError are the agent's own
@@ -272,35 +365,16 @@ async def _run(source: str, input_json: str | None = None,
                 # "the run failed for a reason your program already handles".
                 # Cost is attached by run_agent (see `_drift_cost`) even on
                 # failure, since a run can spend real money before failing.
-                if isinstance(e, BudgetExceeded):
-                    kind = "budget"
-                elif isinstance(e, AuthError):
-                    kind = "auth"
-                elif isinstance(e, StepFailed):
-                    kind = "business-logic"
-                else:
-                    kind = "bug"
-                cost_snapshot, outputs = _split_cost_and_outputs(
-                    getattr(e, "_drift_cost", cost or None)
+                # build_run_outcome derives `kind` from the exception type
+                # and folds in `agent`/`step` from the _drift_agent/
+                # _drift_step tags step_decorator already attaches.
+                return build_run_outcome(
+                    error=e, cost=getattr(e, "_drift_cost", cost or None)
                 )
-                return {
-                    "ok": False,
-                    "stage": "run",
-                    "kind": kind,
-                    "error": f"{type(e).__name__}: {e}",
-                    "cost": cost_snapshot,
-                    "outputs": outputs,
-                }
             finally:
                 sys.stdout = old_out
 
-            cost_snapshot, outputs = _split_cost_and_outputs(cost)
-            return {
-                "ok": True,
-                "result": _to_jsonable(result),
-                "cost": cost_snapshot,
-                "outputs": outputs,
-            }
+            return build_run_outcome(result=result, cost=cost)
         finally:
             # Restore/clear the module slot we hijacked so concurrent or
             # subsequent runs don't see a stale program module.
@@ -308,19 +382,6 @@ async def _run(source: str, input_json: str | None = None,
                 sys.modules[module_name] = prev_module
             else:
                 sys.modules.pop(module_name, None)
-
-
-def _to_jsonable(obj: Any) -> Any:
-    import dataclasses
-    if dataclasses.is_dataclass(obj):
-        return {f.name: _to_jsonable(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
-    if isinstance(obj, (list, tuple)):
-        return [_to_jsonable(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, (str, int, float, bool)) or obj is None:
-        return obj
-    return repr(obj)
 
 
 # ─── MCP server entry point ─────────────────────────────────────────────
@@ -368,6 +429,29 @@ def serve_stdio():
                 },
             ),
             types.Tool(
+                name="drift_schema",
+                description=(
+                    "Render a Drift program's `schema` block(s) as JSON Schema — free (no LLM "
+                    "calls; the module is imported but no agent runs). Useful for deriving an "
+                    "external tool's input/output schema from a Drift program without running "
+                    "it. Without `name`, returns every schema declared in `source`: {ok: true, "
+                    "schemas: {name: json_schema, ...}}. With `name`, returns just that one: "
+                    "{ok: true, schema: json_schema}. Returns {ok: false, stage, error} on "
+                    "failure, where stage is one of lex/parse/codegen/discover/import."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string"},
+                        "name": {
+                            "type": "string",
+                            "description": "Name of a specific schema to render (default: all)",
+                        },
+                    },
+                    "required": ["source"],
+                },
+            ),
+            types.Tool(
                 name="drift_run",
                 description=(
                     "Transpile and execute a Drift program (this spends real LLM budget — "
@@ -377,13 +461,17 @@ def serve_stdio():
                     "value) when `pipeline` is given. Optional `pipeline` names a `pipeline` "
                     "declaration to run instead of an agent (required if the source declares "
                     "only pipelines, no agents — mirrors `drift run --pipeline <name>`). "
-                    "Returns {ok, result, cost, outputs} on success — cost is {total_cost, "
-                    "budget, currency, calls}, outputs is the list of the agent's `respond`-"
-                    "statement lines (agent runs only; a pipeline's own cost/outputs aren't "
-                    "separately tracked) — or {ok: false, stage, kind, error, cost, outputs} on "
-                    "failure, where kind is one of budget/auth/business-logic/bug and "
-                    "cost/outputs reflect spend and output produced before the failure. Note: "
-                    "cross-file `import` doesn't resolve here (raw source text, no file path)."
+                    "Optional `agent`/`step` select a specific agent/step by name when a "
+                    "program declares more than one (mirrors `drift run --agent`/`--step`); "
+                    "without `agent`, the first-declared agent is used. Ignored when `pipeline` "
+                    "is given. Returns {ok, result, cost, outputs} on success — cost is "
+                    "{total_cost, budget, currency, calls}, outputs is the list of the agent's "
+                    "`respond`-statement lines (agent runs only; a pipeline's own cost/outputs "
+                    "aren't separately tracked) — or {ok: false, stage, kind, error, agent, "
+                    "step, cost, outputs} on failure, where kind is one of "
+                    "budget/auth/business-logic/bug and cost/outputs reflect spend and output "
+                    "produced before the failure. Note: cross-file `import` doesn't resolve "
+                    "here (raw source text, no file path)."
                 ),
                 inputSchema={
                     "type": "object",
@@ -393,6 +481,14 @@ def serve_stdio():
                         "pipeline": {
                             "type": "string",
                             "description": "Name of a `pipeline` declaration to run instead of an agent",
+                        },
+                        "agent": {
+                            "type": "string",
+                            "description": "Name of a specific agent to run (default: first-declared)",
+                        },
+                        "step": {
+                            "type": "string",
+                            "description": "Name of a specific step to run on the selected agent",
                         },
                     },
                     "required": ["source"],
@@ -406,9 +502,12 @@ def serve_stdio():
             result = _check(arguments["source"])
         elif name == "drift_transpile":
             result = _transpile_result(arguments["source"])
+        elif name == "drift_schema":
+            result = _schema_result(arguments["source"], arguments.get("name"))
         elif name == "drift_run":
             result = await _run(
-                arguments["source"], arguments.get("input"), arguments.get("pipeline")
+                arguments["source"], arguments.get("input"), arguments.get("pipeline"),
+                arguments.get("agent"), arguments.get("step"),
             )
         else:
             result = {"ok": False, "error": f"unknown tool {name!r}"}

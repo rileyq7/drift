@@ -67,11 +67,12 @@ No API key required. Drift falls back to a mock provider so you see something wo
 
 ```
 drift new <name>          Scaffold a starter project
-drift run <file.drift>    Transpile and execute
+drift run <file.drift>    Transpile and execute (--json for machine-readable output)
 drift check <file.drift>  Validate syntax
 drift fmt <file.drift>    Format in place (--check for CI, --stdout to preview)
 drift transpile <file>    Emit Python (use -o to write to a file)
-drift mcp                 Run as an MCP stdio server (drift_check / transpile / run)
+drift schema <file>       Render schema block(s) as JSON Schema
+drift mcp                 Run as an MCP stdio server (drift_check / transpile / schema / run)
 drift lex / parse         Debug tooling
 ```
 
@@ -113,7 +114,7 @@ See [`examples/`](./examples) for working `.drift` programs and their generated 
 
 ## Status
 
-Alpha. Language surface is stable, runtime works, 352/352 tests passing. OpenAI + Anthropic providers, MCP tools, Dendric memory, source-mapped runtime errors. Structured output uses provider-side strict JSON Schema on OpenAI; the Anthropic provider relies on schema-in-prompt plus validation-and-retry (it does not send a JSON Schema). Type system beyond `confident<T>` is on the roadmap.
+Alpha. Language surface is stable, runtime works, 573/573 tests passing. OpenAI + Anthropic providers, MCP tools, Dendric memory, source-mapped runtime errors. Structured output uses provider-side strict JSON Schema on OpenAI; the Anthropic provider relies on schema-in-prompt plus validation-and-retry (it does not send a JSON Schema). Type system beyond `confident<T>` is on the roadmap.
 
 ## License
 

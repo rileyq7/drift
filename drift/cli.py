@@ -8,6 +8,7 @@ Usage:
     drift check <file.drift>          # Validate syntax without running
     drift transpile <file.drift>      # Output Python to stdout
     drift transpile <file> -o out.py  # Write Python to file
+    drift schema <file.drift>         # Output schema block(s) as JSON Schema
     drift lex <file.drift>            # Show token stream (debug)
     drift parse <file.drift>          # Show AST (debug)
 """
@@ -257,6 +258,20 @@ def cmd_check(args):
     print(f"  ✓ {args.file} — syntax OK")
 
 
+def cmd_schema(args):
+    """Render a .drift file's schema block(s) as JSON Schema."""
+    source = read_source(args.file)
+    from drift.mcp_server import _schema_result
+    result = _schema_result(source, args.name)
+
+    if not result["ok"]:
+        sys.stderr.write(f"\n  ✗ {args.file} — {result['error']}\n\n")
+        sys.exit(1)
+
+    payload = result.get("schema", result.get("schemas"))
+    print(json.dumps(payload, indent=2))
+
+
 def cmd_transpile(args):
     source = read_source(args.file)
     try:
@@ -402,8 +417,20 @@ def _transpile_drift_dependencies(program, drift_file: Path, seen: set) -> set:
     return dirs
 
 
+def _read_input(raw: str | None) -> str | None:
+    """Resolve --input's value: '-' reads a JSON blob from stdin (so a
+    sandbox wrapper can pipe input without shell-escaping large/quoted
+    JSON into an argv string), anything else is returned as-is (a literal
+    JSON string, matching --input's existing behavior)."""
+    if raw == '-':
+        return sys.stdin.read()
+    return raw
+
+
 def _run_once(args):
     """Transpile + execute a single time. Returns 0 on success, nonzero on failure."""
+    if getattr(args, 'json', False):
+        return _run_once_json(args)
     source = read_source(args.file)
     try:
         tokens = lex(source)
@@ -487,7 +514,8 @@ def _run_once(args):
                     f"\n  ✗ Pipeline '{args.pipeline}' not found. Available: {avail}\n\n"
                 )
                 return 1
-            initial = json.loads(args.input) if args.input else None
+            raw_input = _read_input(args.input)
+            initial = json.loads(raw_input) if raw_input else None
             asyncio.run(pipe_cls().run(initial_input=initial))
             return 0
 
@@ -521,9 +549,8 @@ def _run_once(args):
             # object's line number reflects source order.
             agent_cls = first_declared(agents.values())
 
-        inputs = {}
-        if args.input:
-            inputs = json.loads(args.input)
+        raw_input = _read_input(args.input)
+        inputs = json.loads(raw_input) if raw_input else {}
 
         asyncio.run(run_agent(agent_cls, step_name=args.step, inputs=inputs))
         return 0
@@ -554,9 +581,150 @@ def _run_once(args):
         return 1
 
 
+def _run_once_json(args) -> int:
+    """`--json` entrypoint for `drift run`: a stable stdin-in/stdout-out
+    contract for a sandbox wrapper that has no human reading the terminal —
+    every human-oriented print() (transpile confirmation, box-drawing
+    banner, cost summary text) is captured and discarded, and exactly one
+    JSON object (build_run_outcome's shape, plus a `stage` field on
+    compile-time failures to match the MCP server's convention) is written
+    to stdout. Prints nothing else and never raises — errors become
+    {ok: false, ...} like every other stage of this pipeline.
+    """
+    import io
+    if not os.path.exists(args.file):
+        json.dump({"ok": False, "stage": "read", "error": f"File not found: {args.file}"}, sys.stdout)
+        return 1
+    with open(args.file, 'r') as f:
+        source = f.read()
+
+    old_out = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        tokens = lex(source)
+        parser = Parser(tokens)
+        program = parser.parse()
+        seen_deps = set()
+        dep_dirs = _transpile_drift_dependencies(program, Path(args.file), seen_deps)
+        codegen = CodeGenerator()
+        python_source = codegen.generate(program)
+        python_source = python_source.replace("Source: <drift_file>", f"Source: {args.file}")
+    except LexError as e:
+        sys.stdout = old_out
+        return _emit_json({"ok": False, "stage": "lex", "error": str(e)})
+    except ParseError as e:
+        sys.stdout = old_out
+        return _emit_json({"ok": False, "stage": "parse", "error": str(e)})
+    except CodegenError as e:
+        sys.stdout = old_out
+        return _emit_json({"ok": False, "stage": "codegen", "error": str(e)})
+    except _DependencyError as e:
+        sys.stdout = old_out
+        return _emit_json({"ok": False, "stage": "import", "error": f"dependency {e.dep_path} failed to compile"})
+
+    try:
+        py_path = Path(args.file).with_suffix('.py')
+        with open(py_path, 'w') as f:
+            f.write(python_source)
+
+        sys.modules.pop('drift_generated', None)
+        for dep_path in seen_deps:
+            sys.modules.pop(dep_path.stem, None)
+        spec = importlib.util.spec_from_file_location("drift_generated", py_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['drift_generated'] = module
+        candidate_dirs = {py_path.resolve().parent} | dep_dirs
+        added_dirs = [str(d) for d in candidate_dirs if str(d) not in sys.path]
+        sys.path[0:0] = added_dirs
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            for d in added_dirs:
+                sys.path.remove(d)
+    except Exception as e:
+        sys.stdout = old_out
+        return _emit_json({"ok": False, "stage": "import", "error": f"{type(e).__name__}: {e}"})
+
+    from drift.runtime.core import Agent, run_agent, first_declared, build_run_outcome
+    agents = {}
+    pipelines = {}
+    for name in dir(module):
+        obj = getattr(module, name)
+        if isinstance(obj, type) and issubclass(obj, Agent) and obj is not Agent:
+            agents[name] = obj
+        elif isinstance(obj, type) and not name.startswith('_') and hasattr(obj, 'run'):
+            if obj is Agent:
+                continue
+            run_attr = getattr(obj, 'run', None)
+            if run_attr is not None and asyncio.iscoroutinefunction(run_attr):
+                pipelines[name] = obj
+
+    raw_input = _read_input(args.input)
+    try:
+        parsed_input = json.loads(raw_input) if raw_input else None
+    except json.JSONDecodeError as e:
+        sys.stdout = old_out
+        return _emit_json({"ok": False, "stage": "input", "error": f"invalid input JSON: {e}"})
+
+    if args.pipeline:
+        pipe_cls = pipelines.get(args.pipeline)
+        if not pipe_cls:
+            avail = ', '.join(pipelines) if pipelines else '(none)'
+            sys.stdout = old_out
+            return _emit_json({"ok": False, "stage": "discover", "error": f"Pipeline {args.pipeline!r} not found. Available: {avail}"})
+        try:
+            result = asyncio.run(pipe_cls().run(initial_input=parsed_input))
+        except Exception as e:
+            sys.stdout = old_out
+            return _emit_json({"ok": False, "stage": "run", "kind": "bug", "error": f"{type(e).__name__}: {e}"})
+        sys.stdout = old_out
+        from drift.runtime.core import _to_jsonable
+        return _emit_json({"ok": True, "result": _to_jsonable(result)})
+
+    if not agents:
+        sys.stdout = old_out
+        if pipelines:
+            return _emit_json({
+                "ok": False, "stage": "discover",
+                "error": f"No agents found, but pipelines are: {', '.join(pipelines)}. Pass --pipeline <name>.",
+            })
+        return _emit_json({"ok": False, "stage": "discover", "error": "No agents found in the generated code."})
+
+    if args.agent:
+        agent_cls = agents.get(args.agent)
+        if not agent_cls:
+            sys.stdout = old_out
+            return _emit_json({"ok": False, "stage": "discover", "error": f"Agent {args.agent!r} not found. Available: {', '.join(agents.keys())}"})
+    else:
+        agent_cls = first_declared(agents.values())
+
+    inputs = parsed_input if parsed_input is not None else {}
+    cost: dict = {}
+    try:
+        result = asyncio.run(run_agent(agent_cls, step_name=args.step, inputs=inputs, cost_out=cost))
+    except Exception as e:
+        sys.stdout = old_out
+        return _emit_json(build_run_outcome(error=e, cost=getattr(e, "_drift_cost", cost or None)))
+
+    sys.stdout = old_out
+    return _emit_json(build_run_outcome(result=result, cost=cost))
+
+
+def _emit_json(outcome: dict) -> int:
+    print(json.dumps(outcome, indent=2, default=str))
+    return 0 if outcome.get("ok") else 1
+
+
 def cmd_run(args):
-    # Load .env from the .drift file's directory tree.
     n_loaded = _load_env(Path(args.file))
+
+    if args.json:
+        if args.watch:
+            sys.stderr.write("\n  ✗ --json and --watch cannot be combined.\n\n")
+            sys.exit(1)
+        rc = _run_once(args)
+        sys.exit(rc)
+
     provider = _provider_name()
     banner = f"  ▸ provider: {provider}"
     if n_loaded:
@@ -709,10 +877,12 @@ def main():
     p_run.add_argument('file', help='Path to .drift file')
     p_run.add_argument('--step', help='Specific step to run')
     p_run.add_argument('--agent', help='Specific agent to run')
-    p_run.add_argument('--input', help='JSON input string')
+    p_run.add_argument('--input', help="JSON input string, or '-' to read JSON from stdin")
     p_run.add_argument('--pipeline', help='Run a declared pipeline by name (instead of an agent)')
     p_run.add_argument('--trace', action='store_true', help='Show full Python traceback on runtime errors')
     p_run.add_argument('--watch', action='store_true', help='Re-run when the .drift file changes')
+    p_run.add_argument('--json', action='store_true',
+                        help='Emit one JSON result object to stdout instead of human-readable output')
     p_run.set_defaults(func=cmd_run)
 
     p_check = subparsers.add_parser('check', help='Validate syntax without running')
@@ -729,6 +899,11 @@ def main():
     p_trans.add_argument('file', help='Path to .drift file')
     p_trans.add_argument('-o', '--output', help='Output .py file path')
     p_trans.set_defaults(func=cmd_transpile)
+
+    p_schema = subparsers.add_parser('schema', help="Render a .drift file's schema block(s) as JSON Schema")
+    p_schema.add_argument('file', help='Path to .drift file')
+    p_schema.add_argument('--name', help='Render only this schema (default: all)')
+    p_schema.set_defaults(func=cmd_schema)
 
     p_lex = subparsers.add_parser('lex', help='Show token stream (debug)')
     p_lex.add_argument('file', help='Path to .drift file')
